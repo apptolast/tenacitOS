@@ -2,7 +2,8 @@ name: Build and Push Docker Image
 
 # Build automatico de la imagen Docker para el deployment K8s de AppToLast.
 # Trigger en push a apptolast branch O manual via workflow_dispatch.
-# Push a GHCR (ghcr.io/apptolast/tenacitos) usando GITHUB_TOKEN (no requiere secrets adicionales).
+# Push a Docker Hub (docker.io/apptolast/tenacitos) usando secrets
+# DOCKERHUB_USERNAME + DOCKERHUB_TOKEN configurados en el repo.
 
 on:
   push:
@@ -21,7 +22,7 @@ on:
         default: ''
 
 env:
-  REGISTRY: ghcr.io
+  REGISTRY: docker.io
   IMAGE_NAME: apptolast/tenacitos
 
 jobs:
@@ -29,7 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout
@@ -38,12 +38,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract short SHA
         id: vars
@@ -57,9 +57,9 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:apptolast
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:apptolast-${{ steps.vars.outputs.sha_short }}${{ github.event.inputs.tag_suffix }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:apptolast
+            ${{ env.IMAGE_NAME }}:apptolast-${{ steps.vars.outputs.sha_short }}${{ github.event.inputs.tag_suffix }}
+            ${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
@@ -73,13 +73,13 @@ jobs:
         run: |
           echo "## Build successful 🎉" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Image pushed to GHCR:" >> $GITHUB_STEP_SUMMARY
+          echo "Image pushed to Docker Hub:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:apptolast\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:apptolast-${{ steps.vars.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.IMAGE_NAME }}:apptolast\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.IMAGE_NAME }}:apptolast-${{ steps.vars.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Para pull desde el cluster K8s:" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "kubectl set image -n openclaw deploy/openclaw tenacitos=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:apptolast-${{ steps.vars.outputs.sha_short }}" >> $GITHUB_STEP_SUMMARY
+          echo "kubectl set image -n openclaw deploy/openclaw tenacitos=${{ env.IMAGE_NAME }}:apptolast-${{ steps.vars.outputs.sha_short }}" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

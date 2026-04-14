@@ -33,11 +33,13 @@ El push a `apptolast` triggerea automaticamente el GitHub Action que hace build+
 
 ## Imagen Docker
 
+Published a **Docker Hub** (no GHCR) usando secrets `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN` ya configurados en el repo.
+
 | Tag | Cuando se actualiza |
 |---|---|
-| `ghcr.io/apptolast/tenacitos:apptolast` | En cada push a esta rama (rolling tag, no recomendado para produccion) |
-| `ghcr.io/apptolast/tenacitos:apptolast-<sha7>` | En cada build, immutable, recomendado para K8s |
-| `ghcr.io/apptolast/tenacitos:latest` | En cada push a esta rama |
+| `apptolast/tenacitos:apptolast` | En cada push a esta rama (rolling tag) |
+| `apptolast/tenacitos:apptolast-<sha7>` | En cada build, immutable, recomendado para K8s |
+| `apptolast/tenacitos:latest` | En cada push a esta rama |
 
 ## Despliegue en K8s
 
