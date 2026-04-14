@@ -1,0 +1,46 @@
+# Build artifacts
+.next
+node_modules
+out
+dist
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Environment files (NUNCA copiar al image - secrets via K8s Secret en runtime)
+.env
+.env.local
+.env.production
+.env*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Tests
+coverage
+.nyc_output
+
+# Docs (no necesarios en el image)
+docs/screenshots
+ROADMAP.md
+SECURITY.md
+CONTRIBUTING.md
+
+# Scripts dev
+scripts/collect-usage.sh
+scripts/setup-cron.sh
+scripts/pre-commit-check.sh
