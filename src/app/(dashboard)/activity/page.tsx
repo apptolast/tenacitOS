@@ -111,7 +111,10 @@ export default function ActivityPage() {
   const [startDate, setStartDate] = useState<string>("");
   const [endDate, setEndDate] = useState<string>("");
   const [sort, setSort] = useState<"newest" | "oldest">("newest");
-  const [activePreset, setActivePreset] = useState<number | null>(1); // Default: Last 7 days
+  // Default "All time" (index 3): the SQLite activity DB is seeded from PVC
+  // data which spans months, so narrower default ranges show an empty feed
+  // and give the false impression the system has no activity.
+  const [activePreset, setActivePreset] = useState<number | null>(3);
 
   const limit = 20;
 
@@ -182,10 +185,10 @@ export default function ActivityPage() {
   }, [sort, selectedTypes, filterStatus, startDate, endDate]);
 
   useEffect(() => {
-    const end = format(endOfDay(new Date()), "yyyy-MM-dd");
-    const start = format(startOfDay(subDays(new Date(), 7)), "yyyy-MM-dd");
-    setStartDate(start);
-    setEndDate(end);
+    // Match the default activePreset (All time) — leave dates empty so the
+    // API returns the full history from the PVC-derived fallback.
+    setStartDate("");
+    setEndDate("");
   }, []);
 
   const handlePresetClick = (days: number, index: number) => {
