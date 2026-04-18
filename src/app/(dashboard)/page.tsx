@@ -74,10 +74,11 @@ export default function DashboardPage() {
             letterSpacing: '-1.5px'
           }}
         >
-          🦞 Mission Control
+          {(process.env.NEXT_PUBLIC_AGENT_EMOJI || "🦞") + " "}
+          {process.env.NEXT_PUBLIC_AGENT_NAME || "TenacitOS"}
         </h1>
         <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-          Overview of Tenacitas agent activity
+          {`Overview of ${process.env.NEXT_PUBLIC_AGENT_NAME || "TenacitOS"} agent activity`}
         </p>
       </div>
 

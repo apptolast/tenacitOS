@@ -41,17 +41,29 @@ const DEFAULT_AGENT_CONFIG: Record<string, { emoji: string; color: string; name?
  * Get agent display info (emoji, color, name) from openclaw.json or defaults
  */
 function getAgentDisplayInfo(agentId: string, agentConfig: any): { emoji: string; color: string; name: string } {
-  // First try to get from agent's own config in openclaw.json
-  const configEmoji = agentConfig?.ui?.emoji;
+  // Priority: ui.emoji > identity.emoji > default
+  // AppToLast agents use identity.emoji in openclaw.json (🧠, 📱, 📚, 💼, 🔬, 💡, 🐙, 📝).
+  const configEmoji = agentConfig?.ui?.emoji || agentConfig?.identity?.emoji;
   const configColor = agentConfig?.ui?.color;
-  const configName = agentConfig?.name;
+  const configName = agentConfig?.name || agentConfig?.identity?.name;
 
-  // Then try defaults
   const defaults = DEFAULT_AGENT_CONFIG[agentId];
+
+  // Per-agent color fallback matches the Office 3D palette
+  const colorDefaults: Record<string, string> = {
+    coordinador: "#FFCC00",
+    "social-media": "#EC4899",
+    profe: "#4ADE80",
+    linkedin: "#0077B5",
+    investigador: "#8B5CF6",
+    ideador: "#F97316",
+    "github-apptolast": "#24292E",
+    documentador: "#06B6D4",
+  };
 
   return {
     emoji: configEmoji || defaults?.emoji || "🤖",
-    color: configColor || defaults?.color || "#666666",
+    color: configColor || defaults?.color || colorDefaults[agentId] || "#666666",
     name: configName || defaults?.name || agentId,
   };
 }
@@ -67,27 +79,44 @@ export async function GET() {
         config.channels?.telegram?.accounts?.[agent.id];
       const botToken = telegramAccount?.botToken;
 
-      // Resolve "last activity" from the most recent memory file the agent has
-      // written to, not just today's file — an agent that wrote yesterday
-      // should still surface its lastActivity for the UI timeline.
-      const memoryPath = join(agent.workspace, "memory");
+      // Resolve "last activity" from whichever is newer:
+      //   - most recent memory/YYYY-MM-DD.md file (daily memory writes)
+      //   - most recent agents/<id>/sessions/*.jsonl file (real session activity)
+      // Agents that rarely write memory (social-media, profe, linkedin, etc.)
+      // still get a correct timestamp from their session files.
       let lastActivity: string | undefined;
       let status: "online" | "offline" = "offline";
+      let latestMs = 0;
 
       try {
-        const files = readdirSync(memoryPath).filter((f) =>
+        const memoryPath = join(agent.workspace, "memory");
+        const memFiles = readdirSync(memoryPath).filter((f) =>
           /^\d{4}-\d{2}-\d{2}\.md$/.test(f)
         );
-        files.sort().reverse();
-        if (files.length > 0) {
-          const st = statSync(join(memoryPath, files[0]));
-          lastActivity = st.mtime.toISOString();
-          // Online = activity within the last 5 minutes on the latest file
-          status =
-            Date.now() - st.mtime.getTime() < 5 * 60 * 1000 ? "online" : "offline";
+        memFiles.sort().reverse();
+        if (memFiles.length > 0) {
+          const st = statSync(join(memoryPath, memFiles[0]));
+          if (st.mtimeMs > latestMs) latestMs = st.mtimeMs;
         }
-      } catch {
-        // No memory dir — leave as offline/undefined
+      } catch {}
+
+      try {
+        const sessionsDir = join(
+          process.env.OPENCLAW_DIR || "/root/.openclaw",
+          "agents",
+          agent.id,
+          "sessions"
+        );
+        for (const f of readdirSync(sessionsDir)) {
+          if (!f.endsWith(".jsonl")) continue;
+          const st = statSync(join(sessionsDir, f));
+          if (st.mtimeMs > latestMs) latestMs = st.mtimeMs;
+        }
+      } catch {}
+
+      if (latestMs > 0) {
+        lastActivity = new Date(latestMs).toISOString();
+        status = Date.now() - latestMs < 5 * 60 * 1000 ? "online" : "offline";
       }
 
       // Get details of allowed subagents

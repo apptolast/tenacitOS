@@ -17,6 +17,50 @@ import { readFileSync, existsSync, readdirSync, statSync, openSync, readSync, cl
 import { join } from 'path';
 import { OPENCLAW_DIR } from '@/lib/paths';
 
+/**
+ * Build a reverse index (sessionId → { type, cronJobId, subagentId }) from
+ * cron/runs/*.jsonl so we can classify session files correctly even though
+ * their descriptor records don't carry the canonical gateway "key".
+ *
+ * cron run records include { sessionId, sessionKey: "agent:<id>:cron:<jobId>:run:<sessionId>" }
+ * so we can map any UUID in that index to type=cron.
+ */
+interface SessionIndex {
+  type: 'cron' | 'subagent';
+  cronJobId?: string;
+  subagentId?: string;
+  agentId?: string;
+}
+
+function buildSessionIndex(): Map<string, SessionIndex> {
+  const idx = new Map<string, SessionIndex>();
+  const cronRunsDir = join(OPENCLAW_DIR, 'cron', 'runs');
+  if (!existsSync(cronRunsDir)) return idx;
+  try {
+    for (const f of readdirSync(cronRunsDir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const jobId = f.replace(/\.jsonl$/, '');
+      let raw = '';
+      try { raw = readFileSync(join(cronRunsDir, f), 'utf-8'); } catch { continue; }
+      for (const line of raw.split('\n')) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          const rec = JSON.parse(t) as { sessionId?: string; sessionKey?: string; agentId?: string };
+          if (rec.sessionId && !idx.has(rec.sessionId)) {
+            // Extract agentId from sessionKey "agent:<agentId>:cron:<jobId>:run:<sessionId>"
+            const key = rec.sessionKey || '';
+            const parts = key.split(':');
+            const agentId = rec.agentId || parts[1];
+            idx.set(rec.sessionId, { type: 'cron', cronJobId: jobId, agentId });
+          }
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* ignore */ }
+  return idx;
+}
+
 interface ParsedSession {
   id: string;
   key: string;
@@ -163,7 +207,8 @@ function buildKey(agentId: string, parts: ReturnType<typeof deriveTypeFromDescri
 
 function parseSessionFile(
   agentId: string,
-  filePath: string
+  filePath: string,
+  indexHint?: SessionIndex
 ): ParsedSession | null {
   try {
     const st = statSync(filePath);
@@ -214,7 +259,24 @@ function parseSessionFile(
       }
     }
 
-    const parts = deriveTypeFromDescriptor(descriptor);
+    // Prefer the cron-runs index (authoritative: records the session was
+    // spawned by a specific cron job). Fall back to descriptor parsing.
+    let parts = deriveTypeFromDescriptor(descriptor);
+    if (indexHint?.type === 'cron') {
+      parts = {
+        type: 'cron',
+        typeLabel: 'Cron Job',
+        typeEmoji: '🕐',
+        cronJobId: indexHint.cronJobId,
+      };
+    } else if (indexHint?.type === 'subagent') {
+      parts = {
+        type: 'subagent',
+        typeLabel: 'Sub-agent',
+        typeEmoji: '🤖',
+        subagentId: indexHint.subagentId,
+      };
+    }
     const key = buildKey(agentId, parts, sessionId);
 
     return {
@@ -277,10 +339,13 @@ export async function GET(request: NextRequest) {
 }
 
 function listSessions(): NextResponse {
+  const index = buildSessionIndex();
   const sessions: ParsedSession[] = [];
   for (const agentId of listAgentIds()) {
     for (const file of listSessionFiles(agentId)) {
-      const parsed = parseSessionFile(agentId, file);
+      const sessionId = file.split('/').pop()?.replace(/\.jsonl$/, '') || '';
+      const hint = index.get(sessionId);
+      const parsed = parseSessionFile(agentId, file, hint);
       if (parsed) sessions.push(parsed);
     }
   }

@@ -131,8 +131,12 @@ export default function SettingsPage() {
         }}
       >
         <div className="flex items-center justify-between text-sm" style={{ color: "var(--text-muted)" }}>
-          <span>Mission Control v1.0.0</span>
-          <span>OpenClaw Agent Dashboard</span>
+          <span>{(process.env.NEXT_PUBLIC_APP_TITLE || "TenacitOS") + " v1.0.0"}</span>
+          <span>
+            {(process.env.NEXT_PUBLIC_AGENT_EMOJI || "🦞") + " "}
+            {(process.env.NEXT_PUBLIC_AGENT_NAME || "TenacitOS") + " — "}
+            {(process.env.NEXT_PUBLIC_COMPANY_NAME || "AppToLast") + " Mission Control"}
+          </span>
         </div>
       </div>
     </div>

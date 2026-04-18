@@ -69,7 +69,7 @@ function getAgentInfoFromIdentity(workspacePath: string): { name: string; emoji:
 
 export async function GET() {
   try {
-    const workspaces: Workspace[] = [];
+    const byPath = new Map<string, Workspace>();
     const agentMeta = loadAgentMeta();
 
     const mainWorkspace = path.join(OPENCLAW_DIR, 'workspace');
@@ -77,7 +77,7 @@ export async function GET() {
       const configMeta = agentMeta.get(mainWorkspace);
       const identityMeta = configMeta ? null : getAgentInfoFromIdentity(mainWorkspace);
       const resolved = configMeta || identityMeta || { name: 'Workspace', emoji: '🦞' };
-      workspaces.push({
+      byPath.set(mainWorkspace, {
         id: 'workspace',
         name: 'Workspace Principal',
         emoji: resolved.emoji,
@@ -86,27 +86,42 @@ export async function GET() {
       });
     }
 
+    // Collect all workspaces referenced by openclaw.json first — these are
+    // the canonical ones with correct name/emoji.
+    for (const [workspacePath, meta] of agentMeta.entries()) {
+      if (byPath.has(workspacePath)) continue;
+      if (!fs.existsSync(workspacePath)) continue;
+      const agentId =
+        path.basename(workspacePath).replace(/^workspace-/, '') || 'workspace';
+      byPath.set(workspacePath, {
+        id: path.basename(workspacePath),
+        name: meta.name,
+        emoji: meta.emoji,
+        path: workspacePath,
+        agentName: meta.name,
+      });
+      // best-effort ref to avoid linter noise
+      void agentId;
+    }
+
+    // Finally, any workspace-* dir present on disk but NOT in openclaw.json
+    // is shown with a neutral label (legacy/orphan workspace).
     for (const entry of fs.readdirSync(OPENCLAW_DIR, { withFileTypes: true })) {
       if (!entry.isDirectory() || !entry.name.startsWith('workspace-')) continue;
       const workspacePath = path.join(OPENCLAW_DIR, entry.name);
-      const configMeta = agentMeta.get(workspacePath);
-      const identityMeta = configMeta ? null : getAgentInfoFromIdentity(workspacePath);
-      const resolved = configMeta || identityMeta;
-
+      if (byPath.has(workspacePath)) continue;
+      const identityMeta = getAgentInfoFromIdentity(workspacePath);
       const agentId = entry.name.replace('workspace-', '');
-      const workspaceLabel =
-        resolved?.name || agentId.charAt(0).toUpperCase() + agentId.slice(1);
-
-      workspaces.push({
+      byPath.set(workspacePath, {
         id: entry.name,
-        name: workspaceLabel,
-        emoji: resolved?.emoji || '🤖',
+        name: identityMeta?.name || agentId.charAt(0).toUpperCase() + agentId.slice(1),
+        emoji: identityMeta?.emoji || '🤖',
         path: workspacePath,
-        agentName: resolved?.name || undefined,
+        agentName: identityMeta?.name || undefined,
       });
     }
 
-    workspaces.sort((a, b) => {
+    const workspaces = Array.from(byPath.values()).sort((a, b) => {
       if (a.id === 'workspace') return -1;
       if (b.id === 'workspace') return 1;
       return a.name.localeCompare(b.name);
