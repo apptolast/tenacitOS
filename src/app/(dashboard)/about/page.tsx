@@ -61,20 +61,38 @@ export default function AboutPage() {
   const [uptime, setUptime] = useState<string>("");
 
   useEffect(() => {
+    // /api/tasks does not exist; we use /api/cron instead. Each fetch is
+    // wrapped in .catch so a single failure never blocks the rest.
+    const safeJson = async (url: string) => {
+      try {
+        const r = await fetch(url);
+        if (!r.ok) return null;
+        const ct = r.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) return null;
+        return await r.json();
+      } catch {
+        return null;
+      }
+    };
     Promise.all([
-      fetch("/api/activities").then((r) => r.json()),
-      fetch("/api/skills").then((r) => r.json()),
-      fetch("/api/tasks").then((r) => r.json()),
-    ]).then(([activities, skills, tasks]) => {
-      const total = activities.activities?.length || activities.length || 0;
-      const success = (activities.activities || activities).filter(
-        (a: { status: string }) => a.status === "success"
+      safeJson("/api/activities"),
+      safeJson("/api/skills"),
+      safeJson("/api/cron"),
+    ]).then(([activities, skills, cron]) => {
+      const actList = Array.isArray(activities)
+        ? activities
+        : activities?.activities || [];
+      const total = actList.length;
+      const success = actList.filter(
+        (a: { status?: string }) => a?.status === "success"
       ).length;
+      const skillList = Array.isArray(skills) ? skills : skills?.skills || [];
+      const cronList = Array.isArray(cron) ? cron : cron?.jobs || [];
       setStats({
         totalActivities: total,
         successRate: total > 0 ? Math.round((success / total) * 100) : 100,
-        skillsCount: skills.length || 0,
-        cronJobs: tasks.length || 0,
+        skillsCount: skillList.length || 0,
+        cronJobs: cronList.length || 0,
       });
     });
 
