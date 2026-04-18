@@ -20,7 +20,7 @@ const TOKEN_FILE = `${SA_DIR}/token`;
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const pod = searchParams.get('service') || searchParams.get('pod');
-  const container = searchParams.get('container') || undefined;
+  let container = searchParams.get('container') || undefined;
   const tailLines = Math.min(parseInt(searchParams.get('lines') || '200', 10), 2000);
 
   if (!pod) {
@@ -30,11 +30,21 @@ export async function GET(request: NextRequest) {
     return new Response('Not in Kubernetes cluster', { status: 503 });
   }
 
-  // Verify the pod exists in our namespace (prevents cross-namespace probing)
+  // Verify the pod exists in our namespace + auto-pick a container.
+  // The K8s apiserver responds 400 "a container name must be specified..."
+  // for multi-container pods when no ?container=X is given. Our openclaw pod
+  // has 3 containers (openclaw / tenacitos / gateway-proxy), so the user's
+  // Stream button hit this exact error. Default to the first container
+  // listed in the pod spec when the UI did not pass one.
   try {
     const pods = await listPods();
-    if (!pods.find((p) => p.metadata.name === pod)) {
+    const target = pods.find((p) => p.metadata.name === pod);
+    if (!target) {
       return new Response('Pod not found in namespace', { status: 404 });
+    }
+    if (!container) {
+      const specContainers = target.spec?.containers || [];
+      if (specContainers.length > 0) container = specContainers[0].name;
     }
   } catch (err) {
     return new Response(`K8s error: ${err instanceof Error ? err.message : String(err)}`, { status: 502 });

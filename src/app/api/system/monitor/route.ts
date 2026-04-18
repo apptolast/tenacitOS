@@ -30,6 +30,11 @@ interface ServiceEntry {
   podIP?: string;
   containers?: number;
   readyContainers?: number;
+  /** Container names on this pod. Exposed so the Logs page can pick which
+   *  container to stream for multi-container pods (openclaw has 3: openclaw,
+   *  tenacitos, gateway-proxy). Without this, the stream defaults to the
+   *  first container which may not be what the user wants. */
+  containerNames?: string[];
 }
 
 function podToService(pod: K8sPod): ServiceEntry {
@@ -39,6 +44,7 @@ function podToService(pod: K8sPod): ServiceEntry {
   const started = pod.status?.startTime ? new Date(pod.status.startTime).getTime() : null;
   const uptime = started ? Date.now() - started : null;
   const primary = containers[0]?.image || pod.spec?.containers?.[0]?.image;
+  const containerNames = (pod.spec?.containers || []).map((c) => c.name);
   return {
     name: pod.metadata.name,
     status: podDisplayStatus(pod),
@@ -51,6 +57,7 @@ function podToService(pod: K8sPod): ServiceEntry {
     podIP: pod.status?.podIP,
     containers: containers.length,
     readyContainers: ready,
+    containerNames,
   };
 }
 

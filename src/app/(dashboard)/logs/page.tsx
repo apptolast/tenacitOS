@@ -39,6 +39,7 @@ interface SystemMonitorService {
   backend?: string;
   description?: string;
   containers?: number;
+  containerNames?: string[];
 }
 
 export default function LogsPage() {
@@ -59,11 +60,33 @@ export default function LogsPage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { systemd?: SystemMonitorService[] } | null) => {
         if (!data?.systemd || data.systemd.length === 0) return;
-        const opts: ServiceOption[] = data.systemd.map((s) => ({
-          name: s.name,
-          backend: s.backend || "kubernetes",
-          label: s.description || s.name,
-        }));
+        // Flatten multi-container pods into one option per (pod, container).
+        // Ejemplo: openclaw pod → 3 entries: openclaw/openclaw,
+        // openclaw/tenacitos, openclaw/gateway-proxy. Evita K8s 400
+        // "a container name must be specified..." y deja al usuario elegir
+        // cuál streamear.
+        const opts: ServiceOption[] = [];
+        for (const s of data.systemd) {
+          const names = s.containerNames || [];
+          const label = s.description || s.name;
+          if (names.length > 1) {
+            for (const cn of names) {
+              opts.push({
+                name: s.name,
+                backend: s.backend || "kubernetes",
+                label: `${label} / ${cn}`,
+                container: cn,
+              });
+            }
+          } else {
+            opts.push({
+              name: s.name,
+              backend: s.backend || "kubernetes",
+              label,
+              container: names[0],
+            });
+          }
+        }
         if (opts.length) {
           setServices(opts);
           setSelectedService(opts[0]);
