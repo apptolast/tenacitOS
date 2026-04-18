@@ -1,10 +1,86 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { logActivity, getActivities } from '@/lib/activities-db';
+import { gatewayFetch } from '@/lib/gateway';
+
+interface GatewaySession {
+  key?: string;
+  agentId?: string;
+  model?: string;
+  updatedAt?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  label?: string;
+}
+
+interface DerivedActivity {
+  id: string;
+  timestamp: string;
+  type: string;
+  description: string;
+  status: string;
+  duration_ms: number | null;
+  tokens_used: number | null;
+  agent: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+/**
+ * When the SQLite DB has no entries yet (e.g. fresh pod after a rollout),
+ * derive a read-only activity list from recent gateway sessions so the UI
+ * shows something meaningful instead of an empty feed.
+ */
+async function deriveFromGateway(limit: number): Promise<DerivedActivity[]> {
+  const candidates = ['/api/sessions', '/api/v1/sessions'];
+  let sessions: GatewaySession[] | null = null;
+  for (const p of candidates) {
+    try {
+      const data = await gatewayFetch<unknown>(p, { timeoutMs: 2500 });
+      if (Array.isArray(data)) {
+        sessions = data as GatewaySession[];
+        break;
+      }
+      const any = data as { sessions?: GatewaySession[]; items?: GatewaySession[] };
+      if (any?.sessions) {
+        sessions = any.sessions;
+        break;
+      }
+      if (any?.items) {
+        sessions = any.items;
+        break;
+      }
+    } catch {
+      /* try next */
+    }
+  }
+  if (!sessions) return [];
+
+  return sessions
+    .filter((s) => s.updatedAt)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+    .slice(0, limit)
+    .map((s) => {
+      const key = s.key || '';
+      const parts = key.split(':');
+      const agentId = s.agentId || parts[1] || 'main';
+      const kind = parts[2] || 'session';
+      return {
+        id: `derived:${key}`,
+        timestamp: new Date(s.updatedAt || Date.now()).toISOString(),
+        type: kind === 'cron' ? 'cron' : kind === 'subagent' ? 'agent_action' : 'message',
+        description: s.label || `${kind} session on ${agentId}`,
+        status: 'success',
+        duration_ms: null,
+        tokens_used: s.totalTokens ?? null,
+        agent: agentId,
+        metadata: { model: s.model, key },
+      };
+    });
+}
 
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-
     const type = searchParams.get('type') || undefined;
     const status = searchParams.get('status') || undefined;
     const agent = searchParams.get('agent') || undefined;
@@ -17,10 +93,22 @@ export async function GET(request: NextRequest) {
 
     const result = getActivities({ type, status, agent, startDate, endDate, sort, limit, offset });
 
-    // CSV export
+    // If DB is empty and no filters, derive recent activities from gateway sessions.
+    let activities = result.activities;
+    let total = result.total;
+    let derived = false;
+    if (total === 0 && !type && !status && !agent && !startDate && !endDate && offset === 0) {
+      const fromGw = await deriveFromGateway(limit);
+      if (fromGw.length > 0) {
+        activities = fromGw;
+        total = fromGw.length;
+        derived = true;
+      }
+    }
+
     if (format === 'csv') {
       const header = 'id,timestamp,type,description,status,duration_ms,tokens_used,agent\n';
-      const rows = result.activities.map((a) => [
+      const rows = activities.map((a) => [
         a.id, a.timestamp, a.type,
         `"${(a.description || '').replace(/"/g, '""')}"`,
         a.status, a.duration_ms ?? '', a.tokens_used ?? '',
@@ -36,11 +124,12 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      activities: result.activities,
-      total: result.total,
+      activities,
+      total,
       limit,
       offset,
-      hasMore: offset + limit < result.total,
+      hasMore: offset + limit < total,
+      derived,
     });
   } catch (error) {
     console.error('Failed to get activities:', error);

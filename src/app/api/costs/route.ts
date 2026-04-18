@@ -8,10 +8,10 @@ import {
   getDailyCost,
   getHourlyCost,
 } from "@/lib/usage-queries";
-import path from "path";
+import { dataFile } from "@/lib/paths";
 
-const DB_PATH = path.join(process.cwd(), "data", "usage-tracking.db");
-const DEFAULT_BUDGET = 100.0; // Default budget in USD
+const DB_PATH = dataFile("usage-tracking.db");
+const DEFAULT_BUDGET = 100.0;
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;

@@ -1,219 +1,184 @@
 import { NextResponse } from "next/server";
-import { readFileSync, statSync, readdirSync } from "fs";
+import { readFileSync, statSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
+import { OPENCLAW_CONFIG } from "@/lib/paths";
+import { gatewayFetch } from "@/lib/gateway";
 
 export const dynamic = "force-dynamic";
 
-const AGENT_CONFIG = {
-  main: { emoji: "🦞", color: "#ff6b35", name: "Tenacitas", role: "Boss" },
-  academic: {
-    emoji: "🎓",
-    color: "#4ade80",
-    name: "Profe",
-    role: "Teacher",
-  },
-  infra: {
-    emoji: "🔧",
-    color: "#f97316",
-    name: "Infra",
-    role: "DevOps",
-  },
-  studio: {
-    emoji: "🎬",
-    color: "#a855f7",
-    name: "Studio",
-    role: "Video Editor",
-  },
-  social: {
-    emoji: "📱",
-    color: "#ec4899",
-    name: "Social",
-    role: "Social Media",
-  },
-  linkedin: {
-    emoji: "💼",
-    color: "#0077b5",
-    name: "LinkedIn Pro",
-    role: "Professional",
-  },
-  devclaw: {
-    emoji: "👨‍💻",
-    color: "#8b5cf6",
-    name: "DevClaw",
-    role: "Developer",
-  },
-  freelance: {
-    emoji: "👨‍💻",
-    color: "#8b5cf6",
-    name: "DevClaw",
-    role: "Developer",
-  },
+interface OpenClawAgent {
+  id: string;
+  name?: string;
+  workspace?: string;
+  identity?: { name?: string; emoji?: string; role?: string };
+  ui?: { emoji?: string; color?: string };
+}
+
+interface OpenClawConfig {
+  agents: {
+    defaults?: { workspace?: string; model?: { primary?: string } };
+    list: OpenClawAgent[];
+  };
+}
+
+// Fallback emoji/color/role per known AppToLast agent.
+// Extend this map if you add new agents. The visual layout in 3D (positions)
+// is resolved in the frontend agentsConfig.ts.
+const AGENT_VISUAL_DEFAULTS: Record<
+  string,
+  { emoji: string; color: string; role: string }
+> = {
+  coordinador: { emoji: "🧠", color: "#FFCC00", role: "Coordinator" },
+  "social-media": { emoji: "📱", color: "#EC4899", role: "Social Media" },
+  profe: { emoji: "📚", color: "#4ADE80", role: "Teacher" },
+  linkedin: { emoji: "💼", color: "#0077B5", role: "LinkedIn Manager" },
+  investigador: { emoji: "🔬", color: "#8B5CF6", role: "Researcher" },
+  ideador: { emoji: "💡", color: "#F97316", role: "Brainstorming" },
+  "github-apptolast": { emoji: "🐙", color: "#24292E", role: "GitHub Ops" },
+  documentador: { emoji: "📝", color: "#06B6D4", role: "Documentation" },
+  main: { emoji: "🦞", color: "#FF6B35", role: "Main Agent" },
 };
 
-interface AgentSession {
-  agentId: string;
-  sessionId: string;
+interface GatewaySession {
+  agentId?: string;
+  key?: string;
   label?: string;
+  updatedAt?: number;
   lastActivity?: string;
-  createdAt?: string;
 }
 
 async function getAgentStatusFromGateway(): Promise<
   Record<string, { isActive: boolean; currentTask: string; lastSeen: number }>
 > {
   try {
-    const configPath = (process.env.OPENCLAW_DIR || "/root/.openclaw") + "/openclaw.json";
-    const config = JSON.parse(readFileSync(configPath, "utf-8"));
-    const gatewayToken = config.gateway?.auth?.token;
-
-    if (!gatewayToken) {
-      console.warn("No gateway token found");
-      return {};
+    const candidates = ["/api/sessions", "/api/v1/sessions"];
+    let sessions: GatewaySession[] | null = null;
+    for (const p of candidates) {
+      try {
+        const data = await gatewayFetch<unknown>(p, { timeoutMs: 2500 });
+        if (Array.isArray(data)) {
+          sessions = data as GatewaySession[];
+          break;
+        }
+        const any = data as { sessions?: GatewaySession[]; items?: GatewaySession[] };
+        if (any?.sessions) {
+          sessions = any.sessions;
+          break;
+        }
+        if (any?.items) {
+          sessions = any.items;
+          break;
+        }
+      } catch {
+        /* try next */
+      }
     }
+    if (!sessions) return {};
 
-    // Try to fetch sessions from gateway
-    const response = await fetch("http://localhost:18789/api/sessions", {
-      headers: {
-        Authorization: `Bearer ${gatewayToken}`,
-      },
-      signal: AbortSignal.timeout(2000), // 2s timeout
-    });
+    const result: Record<string, { isActive: boolean; currentTask: string; lastSeen: number }> = {};
+    const now = Date.now();
 
-    if (!response.ok) {
-      console.warn("Gateway returned non-OK status:", response.status);
-      return {};
-    }
+    for (const s of sessions) {
+      const agentId = s.agentId || (s.key ? s.key.split(":")[1] : undefined);
+      if (!agentId) continue;
+      const ts =
+        typeof s.updatedAt === "number"
+          ? s.updatedAt
+          : s.lastActivity
+          ? new Date(s.lastActivity).getTime()
+          : 0;
+      if (!ts) continue;
 
-    // Verify Content-Type before parsing JSON
-    const contentType = response.headers.get("content-type");
-    if (!contentType || !contentType.includes("application/json")) {
-      console.warn("Gateway returned non-JSON response:", contentType);
-      return {};
-    }
-
-    const sessions = (await response.json()) as AgentSession[];
-    const agentStatus: Record<
-      string,
-      { isActive: boolean; currentTask: string; lastSeen: number }
-    > = {};
-
-    for (const session of sessions) {
-      if (!session.agentId) continue;
-
-      const lastActivity = session.lastActivity
-        ? new Date(session.lastActivity).getTime()
-        : 0;
-      const now = Date.now();
-      const minutesAgo = (now - lastActivity) / 1000 / 60;
-
-      let status = "SLEEPING";
-      let currentTask = "zzZ...";
-
-      if (minutesAgo < 5) {
-        status = "ACTIVE";
-        currentTask = session.label || "Working on task...";
-      } else if (minutesAgo < 30) {
-        status = "IDLE";
-        currentTask = session.label || "Idle...";
+      const minsAgo = (now - ts) / 60000;
+      let label: string;
+      let isActive: boolean;
+      if (minsAgo < 5) {
+        isActive = true;
+        label = `ACTIVE: ${s.label || "Working on task…"}`;
+      } else if (minsAgo < 30) {
+        isActive = false;
+        label = `IDLE: ${s.label || "Recent activity"}`;
+      } else {
+        isActive = false;
+        label = "SLEEPING: zzZ…";
       }
 
-      // Keep most recent activity per agent
-      if (
-        !agentStatus[session.agentId] ||
-        lastActivity > agentStatus[session.agentId].lastSeen
-      ) {
-        agentStatus[session.agentId] = {
-          isActive: status === "ACTIVE",
-          currentTask: `${status}: ${currentTask}`,
-          lastSeen: lastActivity,
-        };
+      if (!result[agentId] || ts > result[agentId].lastSeen) {
+        result[agentId] = { isActive, currentTask: label, lastSeen: ts };
       }
     }
 
-    return agentStatus;
-  } catch (error) {
-    console.warn("Failed to fetch from gateway:", error);
+    return result;
+  } catch (err) {
+    console.warn("office: gateway unreachable, falling back to memory files", err);
     return {};
   }
 }
 
 function getAgentStatusFromFiles(
-  agentId: string,
   workspace: string
 ): { isActive: boolean; currentTask: string; lastSeen: number } {
   try {
-    const today = new Date().toISOString().split("T")[0];
-    const memoryFile = join(workspace, "memory", `${today}.md`);
-
-    // Check if file exists
-    const stat = statSync(memoryFile);
-    const lastSeen = stat.mtime.getTime();
-    const minutesSinceUpdate = (Date.now() - lastSeen) / 1000 / 60;
-
-    const content = readFileSync(memoryFile, "utf-8");
-    const lines = content.trim().split("\n").filter((l) => l.trim());
-
-    let currentTask = "Idle...";
-    if (lines.length > 0) {
-      // Get last meaningful line (skip timestamps)
-      const lastLine = lines
-        .slice(-10)
-        .reverse()
-        .find((l) => l.length > 20 && !l.match(/^#+\s/));
-
-      if (lastLine) {
-        currentTask = lastLine.replace(/^[-*]\s*/, "").slice(0, 100);
-        if (lastLine.length > 100) currentTask += "...";
-      }
+    const memoryDir = join(workspace, "memory");
+    if (!existsSync(memoryDir)) {
+      return { isActive: false, currentTask: "SLEEPING: zzZ…", lastSeen: 0 };
     }
+    const files = readdirSync(memoryDir).filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f));
+    if (files.length === 0) {
+      return { isActive: false, currentTask: "SLEEPING: zzZ…", lastSeen: 0 };
+    }
+    files.sort().reverse();
+    const latest = files[0];
+    const st = statSync(join(memoryDir, latest));
+    const lastSeen = st.mtime.getTime();
+    const minsAgo = (Date.now() - lastSeen) / 60000;
 
-    // Determine status based on file modification time
-    if (minutesSinceUpdate < 5) {
-      return { isActive: true, currentTask: `ACTIVE: ${currentTask}`, lastSeen };
-    } else if (minutesSinceUpdate < 30) {
+    let currentTask = "Recent activity";
+    try {
+      const content = readFileSync(join(memoryDir, latest), "utf-8");
+      const lastLine = content
+        .split("\n")
+        .filter((l) => l.trim().length > 20 && !l.startsWith("#"))
+        .slice(-1)[0];
+      if (lastLine) currentTask = lastLine.replace(/^[-*]\s*/, "").slice(0, 100);
+    } catch {}
+
+    if (minsAgo < 5) return { isActive: true, currentTask: `ACTIVE: ${currentTask}`, lastSeen };
+    if (minsAgo < 60)
       return { isActive: false, currentTask: `IDLE: ${currentTask}`, lastSeen };
-    } else {
-      return { isActive: false, currentTask: "SLEEPING: zzZ...", lastSeen };
-    }
-  } catch (error) {
-    // No memory file or error reading
-    return { isActive: false, currentTask: "SLEEPING: zzZ...", lastSeen: 0 };
+    return { isActive: false, currentTask: "SLEEPING: zzZ…", lastSeen };
+  } catch {
+    return { isActive: false, currentTask: "SLEEPING: zzZ…", lastSeen: 0 };
   }
 }
 
 export async function GET() {
   try {
-    const configPath = (process.env.OPENCLAW_DIR || "/root/.openclaw") + "/openclaw.json";
-    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    const config: OpenClawConfig = JSON.parse(
+      readFileSync(OPENCLAW_CONFIG, "utf-8")
+    );
 
-    // Try gateway first, fallback to file-based
     const gatewayStatus = await getAgentStatusFromGateway();
 
-    const agents = config.agents.list.map((agent: any) => {
-      const agentInfo = AGENT_CONFIG[agent.id as keyof typeof AGENT_CONFIG] || {
-        emoji: "🤖",
-        color: "#666",
-        name: agent.name || agent.id,
+    const agents = (config.agents?.list || []).map((agent) => {
+      const visual = AGENT_VISUAL_DEFAULTS[agent.id] || {
+        emoji: agent.identity?.emoji || "🤖",
+        color: agent.ui?.color || "#666666",
         role: "Agent",
       };
-
-      // Get status from gateway, or fallback to files
-      let status = gatewayStatus[agent.id];
-      if (!status) {
-        status = getAgentStatusFromFiles(agent.id, agent.workspace);
-      }
-
-      // Map freelance -> devclaw for canvas compatibility
-      const canvasId = agent.id === "freelance" ? "devclaw" : agent.id;
-
+      const name = agent.name || agent.identity?.name || agent.id;
+      const workspace = agent.workspace || `${config.agents.defaults?.workspace || ""}`;
+      const gs = gatewayStatus[agent.id];
+      const status = gs ?? getAgentStatusFromFiles(workspace);
       return {
-        id: canvasId,
-        name: agentInfo.name,
-        emoji: agentInfo.emoji,
-        color: agentInfo.color,
-        role: agentInfo.role,
+        id: agent.id,
+        name,
+        emoji: agent.identity?.emoji || visual.emoji,
+        color: agent.ui?.color || visual.color,
+        role: visual.role,
         currentTask: status.currentTask,
         isActive: status.isActive,
+        lastSeen: status.lastSeen,
       };
     });
 
@@ -221,7 +186,11 @@ export async function GET() {
   } catch (error) {
     console.error("Error getting office data:", error);
     return NextResponse.json(
-      { error: "Failed to load office data" },
+      {
+        error: "Failed to load office data",
+        detail: error instanceof Error ? error.message : String(error),
+        agents: [],
+      },
       { status: 500 }
     );
   }

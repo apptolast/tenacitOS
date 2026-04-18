@@ -1,8 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { dataFile, ensureDataDir } from './paths';
 
-const DATA_PATH = path.join(process.cwd(), 'data', 'activities.json');
+const DATA_PATH = dataFile('activities.json');
+ensureDataDir();
 
 export type ActivityType = 
   | 'file' 
@@ -52,11 +54,7 @@ export function logActivity(
   status: ActivityStatus,
   options?: LogActivityOptions
 ): Activity {
-  // Ensure data directory exists
-  const dataDir = path.dirname(DATA_PATH);
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
+  // Data dir is guaranteed by the module-level ensureDataDir() call.
 
   // Read existing activities
   let activities: Activity[] = [];

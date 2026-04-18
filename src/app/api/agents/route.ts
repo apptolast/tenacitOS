@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
+import { OPENCLAW_CONFIG } from "@/lib/paths";
 
 export const dynamic = "force-dynamic";
 
@@ -57,36 +58,36 @@ function getAgentDisplayInfo(agentId: string, agentConfig: any): { emoji: string
 
 export async function GET() {
   try {
-    // Read openclaw config
-    const configPath = (process.env.OPENCLAW_DIR || "/root/.openclaw") + "/openclaw.json";
-    const config = JSON.parse(readFileSync(configPath, "utf-8"));
+    const config = JSON.parse(readFileSync(OPENCLAW_CONFIG, "utf-8"));
 
-    // Get agents from config
     const agents: Agent[] = config.agents.list.map((agent: any) => {
       const agentInfo = getAgentDisplayInfo(agent.id, agent);
 
-      // Get telegram account info
       const telegramAccount =
         config.channels?.telegram?.accounts?.[agent.id];
       const botToken = telegramAccount?.botToken;
 
-      // Check if agent has recent activity
+      // Resolve "last activity" from the most recent memory file the agent has
+      // written to, not just today's file — an agent that wrote yesterday
+      // should still surface its lastActivity for the UI timeline.
       const memoryPath = join(agent.workspace, "memory");
-      let lastActivity = undefined;
+      let lastActivity: string | undefined;
       let status: "online" | "offline" = "offline";
 
       try {
-        const today = new Date().toISOString().split("T")[0];
-        const memoryFile = join(memoryPath, `${today}.md`);
-        const stat = require("fs").statSync(memoryFile);
-        lastActivity = stat.mtime.toISOString();
-        // Consider online if activity within last 5 minutes
-        status =
-          Date.now() - stat.mtime.getTime() < 5 * 60 * 1000
-            ? "online"
-            : "offline";
-      } catch (e) {
-        // No recent activity
+        const files = readdirSync(memoryPath).filter((f) =>
+          /^\d{4}-\d{2}-\d{2}\.md$/.test(f)
+        );
+        files.sort().reverse();
+        if (files.length > 0) {
+          const st = statSync(join(memoryPath, files[0]));
+          lastActivity = st.mtime.toISOString();
+          // Online = activity within the last 5 minutes on the latest file
+          status =
+            Date.now() - st.mtime.getTime() < 5 * 60 * 1000 ? "online" : "offline";
+        }
+      } catch {
+        // No memory dir — leave as offline/undefined
       }
 
       // Get details of allowed subagents

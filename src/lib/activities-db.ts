@@ -6,8 +6,9 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';
+import { dataFile, ensureDataDir } from './paths';
 
-const DB_PATH = path.join(process.cwd(), 'data', 'activities.db');
+const DB_PATH = dataFile('activities.db');
 
 export type ActivityType =
   | 'file'
@@ -46,11 +47,7 @@ let _db: Database.Database | null = null;
 function getDb(): Database.Database {
   if (_db) return _db;
 
-  // Ensure data dir
-  const dataDir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
+  ensureDataDir();
 
   _db = new Database(DB_PATH);
 
@@ -80,7 +77,7 @@ function getDb(): Database.Database {
   // Migrate from JSON if DB is empty and JSON exists
   const count = (_db.prepare('SELECT COUNT(*) as n FROM activities').get() as { n: number }).n;
   if (count === 0) {
-    const jsonPath = path.join(process.cwd(), 'data', 'activities.json');
+    const jsonPath = path.join(path.dirname(DB_PATH), 'activities.json');
     if (fs.existsSync(jsonPath)) {
       try {
         const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));

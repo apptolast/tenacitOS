@@ -72,10 +72,12 @@ export default function CostsPage() {
     );
   }
 
-  const budgetPercent = (costData.thisMonth / costData.budget) * 100;
+  // Guards: division by zero yields NaN/Infinity which would render as "NaN%"
+  const safeDiv = (num: number, den: number) => (den > 0 ? (num / den) * 100 : 0);
+  const budgetPercent = safeDiv(costData.thisMonth, costData.budget);
   const budgetColor = budgetPercent < 60 ? "var(--success)" : budgetPercent < 85 ? "var(--warning)" : "var(--error)";
-  const todayChange = ((costData.today - costData.yesterday) / costData.yesterday) * 100;
-  const monthChange = ((costData.thisMonth - costData.lastMonth) / costData.lastMonth) * 100;
+  const todayChange = safeDiv(costData.today - costData.yesterday, costData.yesterday);
+  const monthChange = safeDiv(costData.thisMonth - costData.lastMonth, costData.lastMonth);
 
   return (
     <div className="space-y-6">

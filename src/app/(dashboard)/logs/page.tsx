@@ -9,13 +9,19 @@ interface LogLine {
   id: number;
 }
 
-const SERVICES = [
-  { name: "mission-control", backend: "systemd", label: "Mission Control" },
-  { name: "classvault", backend: "pm2", label: "ClassVault" },
-  { name: "content-vault", backend: "pm2", label: "Content Vault" },
-  { name: "brain", backend: "pm2", label: "Brain" },
-  { name: "postiz-simple", backend: "pm2", label: "Postiz" },
-  { name: "openclaw-gateway", backend: "systemd", label: "Gateway" },
+interface ServiceOption {
+  name: string;     // pod name (used by the log stream)
+  backend: string;  // "kubernetes"
+  label: string;    // friendly label derived from app label
+  container?: string;
+}
+
+const FALLBACK_SERVICES: ServiceOption[] = [
+  { name: "openclaw", backend: "kubernetes", label: "OpenClaw", container: "openclaw" },
+  { name: "openclaw", backend: "kubernetes", label: "TenacitOS sidecar", container: "tenacitos" },
+  { name: "code-server", backend: "kubernetes", label: "Code Server" },
+  { name: "kubikobot", backend: "kubernetes", label: "Kubikobot" },
+  { name: "kubikobot-meetings", backend: "kubernetes", label: "Kubikobot Meetings" },
 ];
 
 function getLineColor(line: string): string {
@@ -28,8 +34,16 @@ function getLineColor(line: string): string {
   return "#c9d1d9";
 }
 
+interface SystemMonitorService {
+  name: string;
+  backend?: string;
+  description?: string;
+  containers?: number;
+}
+
 export default function LogsPage() {
-  const [selectedService, setSelectedService] = useState(SERVICES[0]);
+  const [services, setServices] = useState<ServiceOption[]>(FALLBACK_SERVICES);
+  const [selectedService, setSelectedService] = useState<ServiceOption>(FALLBACK_SERVICES[0]);
   const [lines, setLines] = useState<LogLine[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -37,6 +51,26 @@ export default function LogsPage() {
   const logRef = useRef<HTMLDivElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const idRef = useRef(0);
+
+  // Auto-discover services from the K8s pod list so that hashed pod names
+  // update without redeploying the frontend.
+  useEffect(() => {
+    fetch("/api/system/monitor")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { systemd?: SystemMonitorService[] } | null) => {
+        if (!data?.systemd || data.systemd.length === 0) return;
+        const opts: ServiceOption[] = data.systemd.map((s) => ({
+          name: s.name,
+          backend: s.backend || "kubernetes",
+          label: s.description || s.name,
+        }));
+        if (opts.length) {
+          setServices(opts);
+          setSelectedService(opts[0]);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const startStream = () => {
     if (esRef.current) {
@@ -46,9 +80,12 @@ export default function LogsPage() {
     setLines([]);
     setStreaming(true);
 
-    const es = new EventSource(
-      `/api/logs/stream?service=${encodeURIComponent(selectedService.name)}&backend=${encodeURIComponent(selectedService.backend)}`
-    );
+    const qs = new URLSearchParams({
+      service: selectedService.name,
+      backend: selectedService.backend,
+      ...(selectedService.container ? { container: selectedService.container } : {}),
+    });
+    const es = new EventSource(`/api/logs/stream?${qs.toString()}`);
 
     es.onmessage = (e) => {
       try {
@@ -128,9 +165,9 @@ export default function LogsPage() {
       }}>
         {/* Service selector */}
         <div style={{ display: "flex", gap: "0.375rem", flexWrap: "wrap" }}>
-          {SERVICES.map((svc) => (
+          {services.map((svc) => (
             <button
-              key={svc.name}
+              key={`${svc.name}:${svc.container || ""}`}
               onClick={() => { setSelectedService(svc); stopStream(); setLines([]); }}
               style={{
                 padding: "0.375rem 0.875rem",

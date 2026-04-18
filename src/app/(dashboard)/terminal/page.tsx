@@ -15,15 +15,13 @@ const QUICK_COMMANDS = [
   "df -h /",
   "free -h",
   "uptime",
-  "ps aux | grep node",
-  "systemctl status mission-control",
-  "pm2 list",
+  "ps aux",
   "ls /home/node/.openclaw/workspace",
   "ls /home/node/.openclaw/agents",
-  "journalctl -u mission-control -n 20 --no-pager",
-  "docker ps",
-  "netstat -tlnp",
-  "cat /proc/loadavg",
+  "cat /host/proc/loadavg",
+  "cat /host/proc/meminfo | head -5",
+  "ls /home/node/.openclaw/tenacitos/data",
+  "ls /home/node/.openclaw/tools",
 ];
 
 export default function TerminalPage() {

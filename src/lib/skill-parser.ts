@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { OPENCLAW_CONFIG, OPENCLAW_DIR } from './paths';
 
 export interface SkillInfo {
   id: string;
@@ -12,146 +13,84 @@ export interface SkillInfo {
   fileCount: number;
   fullContent: string;
   files: string[];
-  agents: string[]; // which agents/workspaces have this skill
+  agents: string[];
 }
 
 interface FrontMatter {
   name?: string;
   description?: string;
   homepage?: string;
-  metadata?: {
-    openclaw?: {
-      emoji?: string;
-    };
-  };
+  metadata?: { openclaw?: { emoji?: string } };
 }
 
-interface ConfiguredSkill {
-  name: string;
-  location: string;
-}
-
-interface SkillsConfig {
-  systemSkillsPath?: string;
-  workspaceSkillsPath?: string;
-  skills: ConfiguredSkill[];
-}
-
-const CONFIG_PATH = path.join(process.cwd(), 'data', 'configured-skills.json');
-const DEFAULT_SYSTEM_PATH = '/usr/lib/node_modules/openclaw/skills';
-const DEFAULT_WORKSPACE_PATH = (process.env.OPENCLAW_DIR || '/root/.openclaw') + '/workspace-infra/skills';
-
-/**
- * Parse SKILL.md front matter (YAML between --- delimiters)
- */
 function parseFrontMatter(content: string): { frontMatter: FrontMatter; body: string } {
-  const frontMatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
-  
-  if (!frontMatterMatch) {
-    return { frontMatter: {}, body: content };
-  }
-
-  const yamlContent = frontMatterMatch[1];
-  const body = frontMatterMatch[2];
-  
-  const frontMatter: FrontMatter = {};
-  
-  const nameMatch = yamlContent.match(/^name:\s*(.+)$/m);
-  if (nameMatch) frontMatter.name = nameMatch[1].trim();
-  
-  const descMatch = yamlContent.match(/^description:\s*(.+)$/m);
-  if (descMatch) frontMatter.description = descMatch[1].trim();
-  
-  const homepageMatch = yamlContent.match(/^homepage:\s*(.+)$/m);
-  if (homepageMatch) frontMatter.homepage = homepageMatch[1].trim();
-  
-  const emojiMatch = yamlContent.match(/"emoji":\s*"([^"]+)"/);
-  if (emojiMatch) {
-    frontMatter.metadata = { openclaw: { emoji: emojiMatch[1] } };
-  }
-  
-  return { frontMatter, body };
+  const m = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+  if (!m) return { frontMatter: {}, body: content };
+  const yaml = m[1];
+  const body = m[2];
+  const fm: FrontMatter = {};
+  const name = yaml.match(/^name:\s*(.+)$/m);
+  if (name) fm.name = name[1].trim();
+  const desc = yaml.match(/^description:\s*(.+)$/m);
+  if (desc) fm.description = desc[1].trim();
+  const hp = yaml.match(/^homepage:\s*(.+)$/m);
+  if (hp) fm.homepage = hp[1].trim();
+  const em = yaml.match(/"emoji":\s*"([^"]+)"/);
+  if (em) fm.metadata = { openclaw: { emoji: em[1] } };
+  return { frontMatter: fm, body };
 }
 
-/**
- * Extract first paragraph as description if no front matter description
- */
 function extractFirstParagraph(body: string): string {
   const lines = body.split('\n');
-  let inParagraph = false;
-  let paragraph = '';
-  
+  let inPara = false;
+  let para = '';
   for (const line of lines) {
-    const trimmed = line.trim();
-    
-    if (trimmed.startsWith('#')) {
-      if (inParagraph) break;
+    const t = line.trim();
+    if (t.startsWith('#')) {
+      if (inPara) break;
       continue;
     }
-    
-    if (!trimmed && !inParagraph) continue;
-    
-    if (trimmed && !inParagraph) {
-      inParagraph = true;
-      paragraph = trimmed;
+    if (!t && !inPara) continue;
+    if (t && !inPara) {
+      inPara = true;
+      para = t;
       continue;
     }
-    
-    if (trimmed && inParagraph) {
-      paragraph += ' ' + trimmed;
+    if (t && inPara) {
+      para += ' ' + t;
       continue;
     }
-    
-    if (!trimmed && inParagraph) break;
+    if (!t && inPara) break;
   }
-  
-  return paragraph || 'No description available';
+  return para || 'No description available';
 }
 
-/**
- * Count files in a skill folder (excluding hidden files)
- */
 function countFiles(skillPath: string): { count: number; files: string[] } {
   try {
     const files: string[] = [];
-    
-    function scanDir(dir: string, prefix: string = '') {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue;
-        const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) {
-          scanDir(path.join(dir, entry.name), relativePath);
-        } else {
-          files.push(relativePath);
-        }
+    const scan = (dir: string, prefix = '') => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.name.startsWith('.')) continue;
+        const rel = prefix ? `${prefix}/${e.name}` : e.name;
+        if (e.isDirectory()) scan(path.join(dir, e.name), rel);
+        else files.push(rel);
       }
-    }
-    
-    scanDir(skillPath);
+    };
+    scan(skillPath);
     return { count: files.length, files };
   } catch {
     return { count: 0, files: [] };
   }
 }
 
-/**
- * Parse a single skill from its directory
- */
 export function parseSkill(skillPath: string, skillName: string, agents: string[] = []): SkillInfo | null {
-  const skillMdPath = path.join(skillPath, 'SKILL.md');
-  
-  if (!fs.existsSync(skillMdPath)) {
-    return null;
-  }
-  
+  const skillMd = path.join(skillPath, 'SKILL.md');
+  if (!fs.existsSync(skillMd)) return null;
   try {
-    const content = fs.readFileSync(skillMdPath, 'utf-8');
+    const content = fs.readFileSync(skillMd, 'utf-8');
     const { frontMatter, body } = parseFrontMatter(content);
     const { count, files } = countFiles(skillPath);
-    
-    const source = skillPath.includes('/workspace') ? 'workspace' : 'system';
-    
+    const source: 'workspace' | 'system' = skillPath.includes('/workspace') ? 'workspace' : 'system';
     return {
       id: skillName,
       name: frontMatter.name || skillName,
@@ -171,119 +110,82 @@ export function parseSkill(skillPath: string, skillName: string, agents: string[
 }
 
 /**
- * Build a map of skill-name -> [agentId] by scanning all workspace skill dirs
+ * Auto-discover skills by scanning every agent's workspace `skills/` directory.
+ * Aggregates by skill name, collecting the list of agents that have each.
  */
-function buildAgentSkillMap(): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  const openclawDir = process.env.OPENCLAW_DIR || '/root/.openclaw';
+export function scanAllSkills(): SkillInfo[] {
+  const byName = new Map<string, { info: SkillInfo; agents: Set<string> }>();
 
-  // Agent workspaces: workspace, workspace-infra, workspace-social, etc.
-  // Read from openclaw.json if possible
   let agentList: Array<{ id: string; workspace: string }> = [];
   try {
-    const openclawConfig = JSON.parse(fs.readFileSync(path.join(openclawDir, 'openclaw.json'), 'utf-8'));
-    agentList = (openclawConfig?.agents?.list || []).map((a: any) => ({
+    const cfg = JSON.parse(fs.readFileSync(OPENCLAW_CONFIG, 'utf-8'));
+    agentList = (cfg?.agents?.list || []).map((a: { id: string; workspace?: string }) => ({
       id: a.id,
-      workspace: a.workspace || path.join(openclawDir, 'workspace'),
+      workspace: a.workspace || path.join(OPENCLAW_DIR, 'workspace'),
     }));
+    // Also include the default workspace (main agent)
+    if (!agentList.find((a) => a.id === 'main')) {
+      agentList.push({ id: 'main', workspace: path.join(OPENCLAW_DIR, 'workspace') });
+    }
   } catch {
-    // Fallback: scan directories
+    // Fallback: scan workspace-* directories directly
     try {
-      const dirs = fs.readdirSync(openclawDir, { withFileTypes: true });
-      for (const d of dirs) {
-        if (d.isDirectory() && d.name.startsWith('workspace')) {
-          const agentId = d.name === 'workspace' ? 'main' : d.name.replace('workspace-', '');
-          agentList.push({ id: agentId, workspace: path.join(openclawDir, d.name) });
-        }
+      for (const e of fs.readdirSync(OPENCLAW_DIR, { withFileTypes: true })) {
+        if (!e.isDirectory() || !e.name.startsWith('workspace')) continue;
+        const id = e.name === 'workspace' ? 'main' : e.name.replace('workspace-', '');
+        agentList.push({ id, workspace: path.join(OPENCLAW_DIR, e.name) });
       }
     } catch {}
   }
 
   for (const { id, workspace } of agentList) {
     const skillsDir = path.join(workspace, 'skills');
+    if (!fs.existsSync(skillsDir)) continue;
+    let entries: string[] = [];
     try {
-      if (!fs.existsSync(skillsDir)) continue;
-      const skillDirs = fs.readdirSync(skillsDir, { withFileTypes: true });
-      for (const d of skillDirs) {
-        if (d.isDirectory()) {
-          const existing = map.get(d.name) || [];
-          existing.push(id);
-          map.set(d.name, existing);
-        }
+      entries = fs
+        .readdirSync(skillsDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+    } catch {
+      continue;
+    }
+    for (const skillName of entries) {
+      const skillPath = path.join(skillsDir, skillName);
+      const skill = parseSkill(skillPath, skillName);
+      if (!skill) continue;
+      const existing = byName.get(skillName);
+      if (existing) {
+        existing.agents.add(id);
+      } else {
+        byName.set(skillName, { info: skill, agents: new Set([id]) });
+      }
+    }
+  }
+
+  // Merge system skills dir if it exists (openclaw bundled skills)
+  const systemSkillsDir = path.join(OPENCLAW_DIR, 'skills');
+  if (fs.existsSync(systemSkillsDir)) {
+    try {
+      for (const e of fs.readdirSync(systemSkillsDir, { withFileTypes: true })) {
+        if (!e.isDirectory()) continue;
+        const skillPath = path.join(systemSkillsDir, e.name);
+        const skill = parseSkill(skillPath, e.name);
+        if (!skill) continue;
+        const existing = byName.get(e.name);
+        if (existing) existing.agents.add('system');
+        else byName.set(e.name, { info: skill, agents: new Set(['system']) });
       }
     } catch {}
   }
 
-  return map;
-}
-
-/**
- * Load configured skills from config file
- */
-function loadConfiguredSkills(): ConfiguredSkill[] {
-  try {
-    const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
-    const config: SkillsConfig = JSON.parse(content);
-    return config.skills || [];
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Scan only configured skills and return parsed skills
- */
-export function scanAllSkills(): SkillInfo[] {
   const skills: SkillInfo[] = [];
-  
-  try {
-    const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
-    const config: SkillsConfig = JSON.parse(content);
-    
-    const systemPath = config.systemSkillsPath || DEFAULT_SYSTEM_PATH;
-    const workspacePath = config.workspaceSkillsPath || DEFAULT_WORKSPACE_PATH;
-
-    // Build agent->skills map for workspace skills
-    const agentSkillMap = buildAgentSkillMap();
-    
-    for (const { name, location } of config.skills) {
-      let skillPath: string;
-      
-      // Resolve path based on location type
-      if (location === 'system') {
-        skillPath = path.join(systemPath, name);
-      } else if (location === 'workspace') {
-        skillPath = path.join(workspacePath, name);
-      } else {
-        // Full path provided
-        skillPath = location;
-      }
-      
-      if (!fs.existsSync(skillPath)) {
-        console.warn(`Skill not found: ${name} at ${skillPath}`);
-        continue;
-      }
-
-      // Determine which agents have this skill
-      const agents = agentSkillMap.get(name) || [];
-      
-      const skill = parseSkill(skillPath, name, agents);
-      if (skill) {
-        skills.push(skill);
-      }
-    }
-    
-    // Sort by source (workspace first), then name
-    skills.sort((a, b) => {
-      if (a.source !== b.source) {
-        return a.source === 'workspace' ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    });
-    
-  } catch (error) {
-    console.error('Error scanning skills:', error);
+  for (const { info, agents } of byName.values()) {
+    skills.push({ ...info, agents: Array.from(agents).sort() });
   }
-  
+  skills.sort((a, b) => {
+    if (a.source !== b.source) return a.source === 'workspace' ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
   return skills;
 }

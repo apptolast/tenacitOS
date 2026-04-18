@@ -1,20 +1,23 @@
 /**
  * Sessions API
- * GET /api/sessions          → list all sessions (from openclaw sessions list --json)
- * GET /api/sessions?id=xxx   → get messages from a specific session (reads JSONL)
+ * GET /api/sessions          → list all sessions (from gateway HTTP API)
+ * GET /api/sessions?id=xxx   → get messages from a specific session (reads JSONL from PVC)
+ *
+ * The previous implementation shelled out to `openclaw sessions list`, which
+ * is not available in the TenacitOS sidecar. We now reach the gateway on
+ * http://localhost:18789 (shared pod netns) using the OPENCLAW_GATEWAY_TOKEN.
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { execSync } from 'child_process';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
-
-const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/.openclaw';
+import { OPENCLAW_DIR, OPENCLAW_CONFIG } from '@/lib/paths';
+import { gatewayFetch } from '@/lib/gateway';
 
 interface RawSession {
   key: string;
-  kind: string;
+  kind?: string;
   updatedAt: number;
-  ageMs: number;
+  ageMs?: number;
   sessionId?: string;
   systemSent?: boolean;
   abortedLastRun?: boolean;
@@ -25,11 +28,14 @@ interface RawSession {
   model?: string;
   modelProvider?: string;
   contextTokens?: number;
+  agentId?: string;
+  label?: string;
 }
 
 interface ParsedSession {
   id: string;
   key: string;
+  agentId: string;
   type: 'main' | 'cron' | 'subagent' | 'direct' | 'unknown';
   typeLabel: string;
   typeEmoji: string;
@@ -46,9 +52,11 @@ interface ParsedSession {
   contextTokens: number;
   contextUsedPercent: number | null;
   aborted: boolean;
+  label?: string;
 }
 
 function parseSessionKey(key: string): {
+  agentId: string;
   type: 'main' | 'cron' | 'subagent' | 'direct' | 'unknown';
   typeLabel: string;
   typeEmoji: string;
@@ -56,26 +64,27 @@ function parseSessionKey(key: string): {
   subagentId?: string;
   isRunEntry: boolean;
 } {
-  // Examples:
-  // agent:main:main
-  // agent:main:cron:<jobId>
-  // agent:main:cron:<jobId>:run:<sessionId>
-  // agent:main:subagent:<subagentId>
-  // agent:main:telegram:<chatId> or agent:main:direct:<...>
-
+  // Expected shapes:
+  // agent:<agentId>:main
+  // agent:<agentId>:cron:<jobId>
+  // agent:<agentId>:cron:<jobId>:run:<sessionId>
+  // agent:<agentId>:subagent:<subagentId>
+  // agent:<agentId>:telegram:<chatId>
+  // agent:<agentId>:discord:channel:<channelId>
   const parts = key.split(':');
+  const agentId = parts[1] || 'main';
 
-  // Skip the ":run:" duplicate entries - these are redundant
   if (parts.includes('run')) {
-    return { type: 'unknown', typeLabel: 'Run Entry', typeEmoji: '🔁', isRunEntry: true };
+    return { agentId, type: 'unknown', typeLabel: 'Run Entry', typeEmoji: '🔁', isRunEntry: true };
   }
 
   if (parts[2] === 'main') {
-    return { type: 'main', typeLabel: 'Main Session', typeEmoji: '🦞', isRunEntry: false };
+    return { agentId, type: 'main', typeLabel: 'Main Session', typeEmoji: '🦞', isRunEntry: false };
   }
 
   if (parts[2] === 'cron') {
     return {
+      agentId,
       type: 'cron',
       typeLabel: 'Cron Job',
       typeEmoji: '🕐',
@@ -86,6 +95,7 @@ function parseSessionKey(key: string): {
 
   if (parts[2] === 'subagent') {
     return {
+      agentId,
       type: 'subagent',
       typeLabel: 'Sub-agent',
       typeEmoji: '🤖',
@@ -94,8 +104,8 @@ function parseSessionKey(key: string): {
     };
   }
 
-  // telegram, direct, etc.
   return {
+    agentId,
     type: 'direct',
     typeLabel: parts[2] ? `${parts[2].charAt(0).toUpperCase() + parts[2].slice(1)} Chat` : 'Direct Chat',
     typeEmoji: '💬',
@@ -106,71 +116,99 @@ function parseSessionKey(key: string): {
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const sessionId = searchParams.get('id');
-
-  // Return messages for a specific session
-  if (sessionId) {
-    return getSessionMessages(sessionId);
-  }
-
-  // Return list of all sessions
+  if (sessionId) return getSessionMessages(sessionId);
   return listSessions();
+}
+
+async function fetchSessionsFromGateway(): Promise<RawSession[]> {
+  const candidates = ['/api/sessions', '/api/v1/sessions', '/sessions'];
+  let lastErr: unknown = null;
+  for (const p of candidates) {
+    try {
+      const data = await gatewayFetch<unknown>(p, { timeoutMs: 6000 });
+      if (Array.isArray(data)) return data as RawSession[];
+      const anyData = data as { sessions?: RawSession[]; items?: RawSession[]; byAgent?: Array<{ recent?: RawSession[] }> };
+      if (anyData?.sessions) return anyData.sessions;
+      if (anyData?.items) return anyData.items;
+      // openclaw status json shape: { sessions: { byAgent: [ { agentId, recent: [] } ] } }
+      if (anyData?.byAgent) {
+        const flat: RawSession[] = [];
+        for (const g of anyData.byAgent) {
+          for (const r of g.recent || []) flat.push(r);
+        }
+        return flat;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (lastErr) throw lastErr;
+  return [];
 }
 
 async function listSessions(): Promise<NextResponse> {
   try {
-    const output = execSync('openclaw sessions list --json 2>/dev/null', {
-      timeout: 10000,
-      encoding: 'utf-8',
-    });
+    const rawSessions = await fetchSessionsFromGateway();
+    const sessions: ParsedSession[] = [];
+    const now = Date.now();
 
-    const data = JSON.parse(output);
-    const rawSessions: RawSession[] = data.sessions || [];
+    for (const raw of rawSessions) {
+      const parsed = parseSessionKey(raw.key);
+      if (parsed.isRunEntry || parsed.type === 'unknown') continue;
 
-    const sessions: ParsedSession[] = rawSessions
-      .reduce<ParsedSession[]>((acc, raw) => {
-        const parsed = parseSessionKey(raw.key);
+      const totalTokens = raw.totalTokens || 0;
+      const contextTokens = raw.contextTokens || 0;
+      const contextUsedPercent =
+        contextTokens > 0 && raw.totalTokensFresh
+          ? Math.round((totalTokens / contextTokens) * 100)
+          : null;
 
-        // Skip run-entry duplicates and unknown types
-        if (parsed.isRunEntry || parsed.type === 'unknown') return acc;
+      sessions.push({
+        id: raw.key,
+        key: raw.key,
+        agentId: raw.agentId || parsed.agentId,
+        type: parsed.type,
+        typeLabel: parsed.typeLabel,
+        typeEmoji: parsed.typeEmoji,
+        sessionId: raw.sessionId || null,
+        cronJobId: parsed.cronJobId,
+        subagentId: parsed.subagentId,
+        updatedAt: raw.updatedAt,
+        ageMs: raw.ageMs ?? Math.max(0, now - raw.updatedAt),
+        model: raw.model || 'unknown',
+        modelProvider: raw.modelProvider || defaultProvider(),
+        inputTokens: raw.inputTokens || 0,
+        outputTokens: raw.outputTokens || 0,
+        totalTokens,
+        contextTokens,
+        contextUsedPercent,
+        aborted: raw.abortedLastRun || false,
+        label: raw.label,
+      });
+    }
 
-        const totalTokens = raw.totalTokens || 0;
-        const contextTokens = raw.contextTokens || 0;
-        const contextUsedPercent =
-          contextTokens > 0 && raw.totalTokensFresh
-            ? Math.round((totalTokens / contextTokens) * 100)
-            : null;
-
-        acc.push({
-          id: raw.key,
-          key: raw.key,
-          type: parsed.type,
-          typeLabel: parsed.typeLabel,
-          typeEmoji: parsed.typeEmoji,
-          sessionId: raw.sessionId || null,
-          cronJobId: parsed.cronJobId,
-          subagentId: parsed.subagentId,
-          updatedAt: raw.updatedAt,
-          ageMs: raw.ageMs,
-          model: raw.model || 'unknown',
-          modelProvider: raw.modelProvider || 'anthropic',
-          inputTokens: raw.inputTokens || 0,
-          outputTokens: raw.outputTokens || 0,
-          totalTokens,
-          contextTokens,
-          contextUsedPercent,
-          aborted: raw.abortedLastRun || false,
-        });
-        return acc;
-      }, []);
-
-    // Sort by updatedAt desc
     sessions.sort((a, b) => b.updatedAt - a.updatedAt);
-
     return NextResponse.json({ sessions, total: sessions.length });
   } catch (error) {
     console.error('[sessions] Error listing sessions:', error);
-    return NextResponse.json({ error: 'Failed to list sessions', sessions: [] }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: 'Failed to list sessions',
+        detail: error instanceof Error ? error.message : String(error),
+        sessions: [],
+      },
+      { status: 502 }
+    );
   }
+}
+
+function defaultProvider(): string {
+  try {
+    const cfg = JSON.parse(readFileSync(OPENCLAW_CONFIG, 'utf-8'));
+    const primary: string | undefined = cfg?.agents?.defaults?.model?.primary;
+    if (primary && primary.includes('/')) return primary.split('/')[0];
+  } catch {}
+  return 'unknown';
 }
 
 interface JsonlLine {
@@ -188,16 +226,24 @@ interface JsonlLine {
   data?: unknown;
 }
 
+function findSessionFile(sessionId: string): string | null {
+  // Sessions can live under any agent workspace: agents/<agentId>/sessions/<uuid>.jsonl
+  const agentsDir = join(OPENCLAW_DIR, 'agents');
+  if (!existsSync(agentsDir)) return null;
+  for (const agentId of readdirSync(agentsDir)) {
+    const p = join(agentsDir, agentId, 'sessions', `${sessionId}.jsonl`);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
 async function getSessionMessages(sessionId: string): Promise<NextResponse> {
-  // Security: only allow UUID-like session IDs
   if (!/^[a-f0-9-]{36}$/.test(sessionId)) {
     return NextResponse.json({ error: 'Invalid session ID' }, { status: 400 });
   }
 
-  const sessionsDir = join(OPENCLAW_DIR, 'agents', 'main', 'sessions');
-  const filePath = join(sessionsDir, `${sessionId}.jsonl`);
-
-  if (!existsSync(filePath)) {
+  const filePath = findSessionFile(sessionId);
+  if (!filePath) {
     return NextResponse.json({ error: 'Session not found', messages: [] }, { status: 404 });
   }
 
@@ -221,11 +267,7 @@ async function getSessionMessages(sessionId: string): Promise<NextResponse> {
     for (const line of lines) {
       try {
         const obj: JsonlLine = JSON.parse(line);
-
-        if (obj.type === 'model_change' && obj.modelId) {
-          currentModel = obj.modelId;
-        }
-
+        if (obj.type === 'model_change' && obj.modelId) currentModel = obj.modelId;
         if (obj.type !== 'message' || !obj.message) continue;
 
         const msg = obj.message;
@@ -264,7 +306,9 @@ async function getSessionMessages(sessionId: string): Promise<NextResponse> {
               });
             } else if (block.type === 'tool_result') {
               const resultContent = Array.isArray(block.text)
-                ? (block.text as Array<{ type: string; text?: string }>).map((b) => b.text || '').join('\n')
+                ? (block.text as Array<{ type: string; text?: string }>)
+                    .map((b) => b.text || '')
+                    .join('\n')
                 : (block.text as string) || '';
               messages.push({
                 id: (obj.id || '') + '-result',
@@ -282,13 +326,12 @@ async function getSessionMessages(sessionId: string): Promise<NextResponse> {
       }
     }
 
-    return NextResponse.json({
-      sessionId,
-      messages,
-      total: messages.length,
-    });
+    return NextResponse.json({ sessionId, messages, total: messages.length });
   } catch (error) {
     console.error('[sessions] Error reading session file:', error);
-    return NextResponse.json({ error: 'Failed to read session', messages: [] }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Failed to read session', messages: [] },
+      { status: 500 }
+    );
   }
 }

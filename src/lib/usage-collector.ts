@@ -2,14 +2,11 @@
  * Usage Collector - Reads OpenClaw session data and calculates costs
  */
 
-import { exec } from "child_process";
-import { promisify } from "util";
 import { calculateCost, normalizeModelId } from "./pricing";
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
-
-const execAsync = promisify(exec);
+import { gatewayFetch } from "./gateway";
 
 export interface SessionData {
   agentId: string;
@@ -36,16 +33,35 @@ export interface UsageSnapshot {
 }
 
 /**
- * Get current OpenClaw status with session data
+ * Get current OpenClaw status (sessions) from the local gateway.
+ * Previously this shelled out to `openclaw status --json`, but the CLI is
+ * not installed in the TenacitOS sidecar. We now hit the gateway HTTP API
+ * on localhost:18789 (shared pod network namespace).
  */
-export async function getOpenClawStatus(): Promise<any> {
-  try {
-    const { stdout } = await execAsync("openclaw status --json");
-    return JSON.parse(stdout);
-  } catch (error) {
-    console.error("Error getting OpenClaw status:", error);
-    throw error;
+export async function getOpenClawStatus(): Promise<{ sessions?: { byAgent?: Array<{ agentId: string; recent?: Array<Record<string, unknown>> }> } }> {
+  const candidates = ["/api/status", "/api/v1/status", "/api/sessions", "/api/v1/sessions"];
+  let lastErr: unknown = null;
+  for (const p of candidates) {
+    try {
+      const data = await gatewayFetch<unknown>(p, { timeoutMs: 5000 });
+      const d = data as { sessions?: unknown; items?: unknown; byAgent?: unknown } | Array<unknown>;
+      if (Array.isArray(d)) {
+        return { sessions: { byAgent: [{ agentId: "main", recent: d as Array<Record<string, unknown>> }] } };
+      }
+      const any = d as { sessions?: { byAgent?: unknown } | unknown[]; items?: unknown[]; byAgent?: unknown[] };
+      if (any?.sessions) return { sessions: any.sessions as { byAgent?: Array<{ agentId: string; recent?: Array<Record<string, unknown>> }> } };
+      if (Array.isArray(any?.items)) {
+        return { sessions: { byAgent: [{ agentId: "main", recent: any.items as Array<Record<string, unknown>> }] } };
+      }
+      if (Array.isArray(any?.byAgent)) {
+        return { sessions: { byAgent: any.byAgent as Array<{ agentId: string; recent?: Array<Record<string, unknown>> }> } };
+      }
+      return d as { sessions?: { byAgent?: Array<{ agentId: string; recent?: Array<Record<string, unknown>> }> } };
+    } catch (e) {
+      lastErr = e;
+    }
   }
+  throw lastErr ?? new Error("gateway unreachable");
 }
 
 /**

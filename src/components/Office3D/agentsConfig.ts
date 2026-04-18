@@ -1,76 +1,87 @@
 /**
- * Office 3D — Agent Configuration
+ * Office 3D — Agent layout (positions + colors).
  *
- * This file defines the visual layout of agents in the 3D office.
- * Names, emojis and roles are loaded at runtime from the OpenClaw API
- * (/api/agents → openclaw.json), so you only need to set positions and colors here.
+ * Visual layout only. Names, emojis, and live status are pulled at runtime
+ * from /api/office (which reads openclaw.json + gateway sessions). Keep this
+ * file in sync with the agents defined in the OpenClaw ConfigMap.
  *
- * Agent IDs correspond to workspace directory suffixes:
- *   id: "main"     → workspace/          (main agent)
- *   id: "studio"   → workspace-studio/
- *   id: "infra"    → workspace-infra/
- *   etc.
- *
- * Add, remove or reposition agents to match your own OpenClaw setup.
+ * Positions are in a roughly 12x12 office grid. Main agent sits at origin;
+ * the other agents orbit around it.
  */
 
 export interface AgentConfig {
   id: string;
   name: string;
   emoji: string;
-  position: [number, number, number]; // x, y, z
+  position: [number, number, number];
   color: string;
   role: string;
 }
 
 export const AGENTS: AgentConfig[] = [
   {
-    id: "main",
-    name: process.env.NEXT_PUBLIC_AGENT_NAME || "Mission Control",
-    emoji: process.env.NEXT_PUBLIC_AGENT_EMOJI || "🦞",
-    position: [0, 0, 0], // Center — main desk
+    id: "coordinador",
+    name: "Coordinador",
+    emoji: "🧠",
+    position: [0, 0, 0],
     color: "#FFCC00",
-    role: "Main Agent",
+    role: "Coordinator",
   },
   {
-    id: "agent-2",
-    name: "Agent 2",
-    emoji: "🤖",
+    id: "social-media",
+    name: "Social",
+    emoji: "📱",
     position: [-4, 0, -3],
-    color: "#4CAF50",
-    role: "Sub-agent",
+    color: "#EC4899",
+    role: "Social Media",
   },
   {
-    id: "agent-3",
-    name: "Agent 3",
-    emoji: "🤖",
+    id: "profe",
+    name: "Profe",
+    emoji: "📚",
     position: [4, 0, -3],
-    color: "#E91E63",
-    role: "Sub-agent",
+    color: "#4ADE80",
+    role: "Teacher",
   },
   {
-    id: "agent-4",
-    name: "Agent 4",
-    emoji: "🤖",
+    id: "linkedin",
+    name: "LinkedIn",
+    emoji: "💼",
     position: [-4, 0, 3],
     color: "#0077B5",
-    role: "Sub-agent",
+    role: "LinkedIn Manager",
   },
   {
-    id: "agent-5",
-    name: "Agent 5",
-    emoji: "🤖",
+    id: "investigador",
+    name: "Investigador",
+    emoji: "🔬",
     position: [4, 0, 3],
-    color: "#9C27B0",
-    role: "Sub-agent",
+    color: "#8B5CF6",
+    role: "Researcher",
   },
   {
-    id: "agent-6",
-    name: "Agent 6",
-    emoji: "🤖",
+    id: "ideador",
+    name: "Ideador",
+    emoji: "💡",
     position: [0, 0, 6],
-    color: "#607D8B",
-    role: "Sub-agent",
+    color: "#F97316",
+    role: "Brainstorming",
+  },
+  {
+    id: "github-apptolast",
+    name: "GitHub",
+    emoji: "🐙",
+    position: [-7, 0, 0],
+    color: "#24292E",
+    role: "GitHub Ops",
+  },
+  {
+    id: "documentador",
+    name: "Documentador",
+    emoji: "📝",
+    position: [7, 0, 0],
+    color: "#06B6D4",
+    role: "Documentation",
   },
 ];
 
@@ -80,8 +91,8 @@ export interface AgentState {
   id: string;
   status: AgentStatus;
   currentTask?: string;
-  model?: string; // opus, sonnet, haiku
+  model?: string;
   tokensPerHour?: number;
   tasksInQueue?: number;
-  uptime?: number; // days
+  uptime?: number;
 }

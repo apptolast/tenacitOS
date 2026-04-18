@@ -3,14 +3,10 @@
  */
 
 import Database from "better-sqlite3";
-import path from "path";
 import fs from "fs";
+import { dataFile } from "./paths";
 
-const DEFAULT_DB_PATH = path.join(
-  process.cwd(),
-  "data",
-  "usage-tracking.db"
-);
+const DEFAULT_DB_PATH = dataFile("usage-tracking.db");
 
 export interface CostSummary {
   today: number;

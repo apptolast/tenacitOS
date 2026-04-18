@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { OPENCLAW_WORKSPACE, dataFile } from '@/lib/paths';
+import { getActivities } from '@/lib/activities-db';
 
-const WORKSPACE = process.env.OPENCLAW_WORKSPACE || '/root/.openclaw/workspace';
+const WORKSPACE = OPENCLAW_WORKSPACE;
 const MEMORY_DIR = path.join(WORKSPACE, 'memory');
 
 interface SearchResult {
@@ -68,41 +70,42 @@ export async function GET(request: Request) {
     results.push(...searchInFile(file, query));
   }
   
-  // Search activities
+  // Search activities via SQLite (PVC-persistent)
   try {
-    const activitiesPath = path.join(process.cwd(), 'data', 'activities.json');
-    const activities = JSON.parse(fs.readFileSync(activitiesPath, 'utf-8'));
     const lowerQuery = query.toLowerCase();
-    
+    const { activities } = getActivities({ limit: 100 });
     for (const activity of activities) {
-      if (activity.description?.toLowerCase().includes(lowerQuery) ||
-          activity.type?.toLowerCase().includes(lowerQuery)) {
+      if (
+        activity.description?.toLowerCase().includes(lowerQuery) ||
+        activity.type?.toLowerCase().includes(lowerQuery)
+      ) {
         results.push({
           type: 'activity',
           title: activity.type,
           snippet: activity.description,
-          timestamp: activity.timestamp
+          timestamp: activity.timestamp,
         });
       }
     }
   } catch {
     // Skip if can't read
   }
-  
-  // Search tasks
+
+  // Search tasks (kept as a JSON file for now; path resolved via TENACITOS_DATA_DIR)
   try {
-    const tasksPath = path.join(process.cwd(), 'data', 'tasks.json');
+    const tasksPath = dataFile('tasks.json');
     const tasks = JSON.parse(fs.readFileSync(tasksPath, 'utf-8'));
     const lowerQuery = query.toLowerCase();
-    
     for (const task of tasks) {
-      if (task.name?.toLowerCase().includes(lowerQuery) ||
-          task.description?.toLowerCase().includes(lowerQuery)) {
+      if (
+        task.name?.toLowerCase().includes(lowerQuery) ||
+        task.description?.toLowerCase().includes(lowerQuery)
+      ) {
         results.push({
           type: 'task',
           title: task.name,
           snippet: task.description,
-          timestamp: task.nextRun
+          timestamp: task.nextRun,
         });
       }
     }

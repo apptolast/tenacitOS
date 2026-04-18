@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { dataFile } from '@/lib/paths';
 
-const DATA_PATH = path.join(process.cwd(), 'data', 'notifications.json');
+const DATA_PATH = dataFile('notifications.json');
 
 export interface Notification {
   id: string;
