@@ -24,11 +24,27 @@ export const MODEL_PRICING: ModelPricing[] = [
     contextWindow: 200000,
   },
   {
+    id: "anthropic/claude-sonnet-4-6",
+    name: "Sonnet 4.6",
+    alias: "sonnet-4-6",
+    inputPricePerMillion: 3.00,
+    outputPricePerMillion: 15.00,
+    contextWindow: 200000,
+  },
+  {
     id: "anthropic/claude-sonnet-4-5",
     name: "Sonnet 4.5",
     alias: "sonnet",
     inputPricePerMillion: 3.00,
     outputPricePerMillion: 15.00,
+    contextWindow: 200000,
+  },
+  {
+    id: "anthropic/claude-haiku-4-5",
+    name: "Haiku 4.5",
+    alias: "haiku-4-5",
+    inputPricePerMillion: 1.00,
+    outputPricePerMillion: 5.00,
     contextWindow: 200000,
   },
   {
@@ -38,6 +54,42 @@ export const MODEL_PRICING: ModelPricing[] = [
     inputPricePerMillion: 0.80,
     outputPricePerMillion: 4.00,
     contextWindow: 200000,
+  },
+  // GitHub Copilot (Pro+ is flat-rate, but we surface underlying Anthropic
+  // prices as "estimated value delivered" so the user sees meaningful numbers).
+  {
+    id: "github-copilot/claude-opus-4.6",
+    name: "Copilot Opus 4.6",
+    alias: "copilot-opus",
+    inputPricePerMillion: 15.00,
+    outputPricePerMillion: 75.00,
+    contextWindow: 200000,
+  },
+  {
+    id: "github-copilot/claude-sonnet-4.6",
+    name: "Copilot Sonnet 4.6",
+    alias: "copilot-sonnet",
+    inputPricePerMillion: 3.00,
+    outputPricePerMillion: 15.00,
+    contextWindow: 200000,
+  },
+  // OpenAI GPT-5 family (our fallback chain). Pricing per OpenAI's public
+  // GPT-5 tiers at the time of writing; update when official numbers shift.
+  {
+    id: "openai/gpt-5.4",
+    name: "GPT-5.4",
+    alias: "gpt-5.4",
+    inputPricePerMillion: 10.00,
+    outputPricePerMillion: 40.00,
+    contextWindow: 400000,
+  },
+  {
+    id: "openai/gpt-5.2",
+    name: "GPT-5.2",
+    alias: "gpt-5.2",
+    inputPricePerMillion: 3.00,
+    outputPricePerMillion: 12.00,
+    contextWindow: 400000,
   },
   // Google Gemini models
   {
@@ -123,10 +175,17 @@ export function normalizeModelId(modelId: string): string {
     haiku: "anthropic/claude-haiku-3-5",
     "gemini-flash": "google/gemini-2.5-flash",
     "gemini-pro": "google/gemini-2.5-pro",
-    // OpenClaw format (without provider/)
+    // Versioned short aliases used by our stack (coordinador/github-apptolast
+    // sessions record `model: "claude-opus-4.6"`, `claude-sonnet-4-6`, etc.)
     "claude-opus-4-6": "anthropic/claude-opus-4-6",
+    "claude-opus-4.6": "anthropic/claude-opus-4-6",
+    "claude-sonnet-4-6": "anthropic/claude-sonnet-4-6",
+    "claude-sonnet-4.6": "anthropic/claude-sonnet-4-6",
     "claude-sonnet-4-5": "anthropic/claude-sonnet-4-5",
+    "claude-haiku-4-5": "anthropic/claude-haiku-4-5",
     "claude-haiku-3-5": "anthropic/claude-haiku-3-5",
+    "gpt-5.4": "openai/gpt-5.4",
+    "gpt-5.2": "openai/gpt-5.2",
     "gemini-2.5-flash": "google/gemini-2.5-flash",
     "gemini-2.5-pro": "google/gemini-2.5-pro",
     // MiniMax
