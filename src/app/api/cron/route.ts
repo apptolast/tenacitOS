@@ -1,19 +1,25 @@
 /**
- * Cron jobs API — proxies the local OpenClaw gateway HTTP API.
+ * Cron jobs API — reads jobs.json from the OpenClaw PVC.
  *
- * The previous implementation shelled out to `openclaw cron list --json`,
- * but the CLI is not installed in the TenacitOS sidecar. The openclaw
- * container and the tenacitos sidecar share the pod network namespace, so
- * we can reach the gateway on http://localhost:18789 with the bearer token
- * from the Secret openclaw-credentials (env: OPENCLAW_GATEWAY_TOKEN).
+ * The OpenClaw gateway does not expose a JSON REST API for cron; its HTTP
+ * endpoints serve the Control UI HTML. The canonical source of truth for
+ * cron jobs is /home/node/.openclaw/cron/jobs.json, which the gateway
+ * writes on every update. Mutations (PUT/DELETE) are currently unsupported
+ * from the sidecar: we would need to talk to the WebSocket control plane
+ * or edit the JSON file directly (and risk racing the gateway). The UI
+ * degrades gracefully to read-only for now.
  */
-import { NextRequest, NextResponse } from "next/server";
-import { gatewayFetch } from "@/lib/gateway";
+import { NextResponse } from "next/server";
+import { readFileSync, existsSync, statSync } from "fs";
+import { join } from "path";
+import { OPENCLAW_DIR } from "@/lib/paths";
 
-interface GatewayCronJob {
-  id: string;
-  agentId?: string;
+const JOBS_FILE = join(OPENCLAW_DIR, "cron", "jobs.json");
+
+interface RawJob {
+  id?: string;
   name?: string;
+  agentId?: string;
   enabled?: boolean;
   createdAtMs?: number;
   updatedAtMs?: number;
@@ -22,13 +28,21 @@ interface GatewayCronJob {
   payload?: Record<string, unknown>;
   delivery?: Record<string, unknown>;
   state?: Record<string, unknown>;
+  deleteAfterRun?: boolean;
+  timeoutSeconds?: number;
+  wakeMode?: string;
+}
+
+interface JobsFile {
+  version?: number;
+  jobs?: RawJob[];
 }
 
 function formatSchedule(schedule: Record<string, unknown> | undefined): string {
   if (!schedule) return "Unknown";
   switch (schedule.kind) {
     case "cron":
-      return `${schedule.expr}${schedule.tz ? ` (${schedule.tz})` : ""}`;
+      return `${schedule.expr || ""}${schedule.tz ? ` (${schedule.tz})` : ""}`.trim();
     case "every": {
       const ms = (schedule.everyMs as number) || 0;
       if (ms >= 3600000) return `Every ${ms / 3600000}h`;
@@ -36,50 +50,43 @@ function formatSchedule(schedule: Record<string, unknown> | undefined): string {
       return `Every ${ms / 1000}s`;
     }
     case "at":
-      return `Once at ${schedule.at}`;
+      return `Once at ${schedule.at || "?"}`;
     default:
       return JSON.stringify(schedule);
   }
 }
 
-function formatDescription(job: GatewayCronJob): string {
+function formatDescription(job: RawJob): string {
   const payload = job.payload || {};
   if (payload.kind === "agentTurn") {
     const msg = (payload.message as string) || "";
-    return msg.length > 120 ? msg.substring(0, 120) + "…" : msg;
+    return msg.length > 140 ? msg.substring(0, 140) + "…" : msg;
   }
   if (payload.kind === "systemEvent") {
     const text = (payload.text as string) || "";
-    return text.length > 120 ? text.substring(0, 120) + "…" : text;
+    return text.length > 140 ? text.substring(0, 140) + "…" : text;
   }
   return "";
 }
 
+function loadJobs(): { jobs: RawJob[]; fileMtimeMs: number | null } {
+  if (!existsSync(JOBS_FILE)) return { jobs: [], fileMtimeMs: null };
+  try {
+    const raw = readFileSync(JOBS_FILE, "utf-8");
+    const parsed = JSON.parse(raw) as JobsFile | RawJob[];
+    const jobs = Array.isArray(parsed) ? parsed : parsed.jobs || [];
+    const mtime = statSync(JOBS_FILE).mtimeMs;
+    return { jobs, fileMtimeMs: mtime };
+  } catch (err) {
+    console.error("[cron] Failed to parse jobs.json:", err);
+    return { jobs: [], fileMtimeMs: null };
+  }
+}
+
 export async function GET() {
   try {
-    // The gateway exposes cron jobs at /api/v1/cron — we try a few likely
-    // paths to remain forward-compatible with minor API renames.
-    let payload: { jobs?: GatewayCronJob[] } | GatewayCronJob[] = [];
-    const candidates = ["/api/cron", "/api/v1/cron", "/cron"];
-    let lastErr: unknown = null;
-    for (const p of candidates) {
-      try {
-        payload = await gatewayFetch(p, { timeoutMs: 6000 });
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    if (lastErr && (!payload || (Array.isArray(payload) && payload.length === 0))) {
-      throw lastErr;
-    }
-
-    const rawJobs: GatewayCronJob[] = Array.isArray(payload)
-      ? payload
-      : (payload.jobs || []);
-
-    const jobs = rawJobs.map((job) => ({
+    const { jobs: raw, fileMtimeMs } = loadJobs();
+    const jobs = raw.map((job) => ({
       id: job.id,
       agentId: job.agentId || "main",
       name: job.name || "Unnamed",
@@ -96,81 +103,46 @@ export async function GET() {
       timezone:
         (job.schedule as Record<string, string> | undefined)?.tz || "UTC",
       nextRun: (job.state as Record<string, unknown> | undefined)?.nextRunAtMs
-        ? new Date(
-            (job.state as Record<string, number>).nextRunAtMs
-          ).toISOString()
+        ? new Date((job.state as Record<string, number>).nextRunAtMs).toISOString()
         : null,
       lastRun: (job.state as Record<string, unknown> | undefined)?.lastRunAtMs
-        ? new Date(
-            (job.state as Record<string, number>).lastRunAtMs
-          ).toISOString()
+        ? new Date((job.state as Record<string, number>).lastRunAtMs).toISOString()
         : null,
     }));
 
-    return NextResponse.json(jobs);
+    return NextResponse.json(jobs, {
+      headers: fileMtimeMs
+        ? { "X-Cron-Source-Mtime": new Date(fileMtimeMs).toISOString() }
+        : {},
+    });
   } catch (error) {
-    console.error("Error fetching cron jobs from gateway:", error);
+    console.error("Error loading cron jobs:", error);
     return NextResponse.json(
       {
-        error: "Failed to fetch cron jobs from OpenClaw gateway",
+        error: "Failed to load cron jobs",
         detail: error instanceof Error ? error.message : String(error),
       },
-      { status: 502 }
+      { status: 500 }
     );
   }
 }
 
-export async function PUT(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { id, enabled } = body;
-    if (!id) {
-      return NextResponse.json({ error: "Job ID is required" }, { status: 400 });
-    }
-    // Gateway's standard mutation endpoint; we try both shapes.
-    const updates: Array<{ path: string; method: "POST" | "PATCH" | "PUT"; body: unknown }> = [
-      { path: `/api/cron/${id}`, method: "PATCH", body: { enabled } },
-      { path: `/api/cron/${id}/${enabled ? "enable" : "disable"}`, method: "POST", body: {} },
-    ];
-    let lastErr: unknown = null;
-    for (const u of updates) {
-      try {
-        await gatewayFetch(u.path, { method: u.method, body: u.body, timeoutMs: 6000 });
-        return NextResponse.json({ success: true, id, enabled });
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw lastErr;
-  } catch (error) {
-    console.error("Error updating cron job:", error);
-    return NextResponse.json(
-      {
-        error: "Failed to update cron job",
-        detail: error instanceof Error ? error.message : String(error),
-      },
-      { status: 502 }
-    );
-  }
+export async function PUT() {
+  return NextResponse.json(
+    {
+      error:
+        "Cron mutations are not supported from the sidecar. Edit cron/jobs.json via `openclaw cron enable/disable` in the openclaw container.",
+    },
+    { status: 501 }
+  );
 }
 
-export async function DELETE(request: NextRequest) {
-  try {
-    const { searchParams } = new URL(request.url);
-    const id = searchParams.get("id");
-    if (!id) {
-      return NextResponse.json({ error: "Job ID is required" }, { status: 400 });
-    }
-    await gatewayFetch(`/api/cron/${id}`, { method: "DELETE", timeoutMs: 6000 });
-    return NextResponse.json({ success: true, deleted: id });
-  } catch (error) {
-    console.error("Error deleting cron job:", error);
-    return NextResponse.json(
-      {
-        error: "Failed to delete cron job",
-        detail: error instanceof Error ? error.message : String(error),
-      },
-      { status: 502 }
-    );
-  }
+export async function DELETE() {
+  return NextResponse.json(
+    {
+      error:
+        "Cron mutations are not supported from the sidecar. Remove the job via `openclaw cron remove <id>` in the openclaw container.",
+    },
+    { status: 501 }
+  );
 }

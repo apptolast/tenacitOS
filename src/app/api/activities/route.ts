@@ -1,17 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { logActivity, getActivities } from '@/lib/activities-db';
-import { gatewayFetch } from '@/lib/gateway';
-
-interface GatewaySession {
-  key?: string;
-  agentId?: string;
-  model?: string;
-  updatedAt?: number;
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-  label?: string;
-}
+import { readdirSync, readFileSync, existsSync, statSync } from 'fs';
+import { join } from 'path';
+import { OPENCLAW_DIR } from '@/lib/paths';
 
 interface DerivedActivity {
   id: string;
@@ -25,57 +16,117 @@ interface DerivedActivity {
   metadata: Record<string, unknown> | null;
 }
 
+interface CronRunRecord {
+  ts?: number;
+  jobId?: string;
+  action?: string;
+  status?: string;
+  summary?: string;
+  durationMs?: number;
+  deliveryStatus?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+  model?: string;
+  provider?: string;
+}
+
 /**
- * When the SQLite DB has no entries yet (e.g. fresh pod after a rollout),
- * derive a read-only activity list from recent gateway sessions so the UI
- * shows something meaningful instead of an empty feed.
+ * Fallback when the SQLite activity DB is empty (e.g. fresh pod after a
+ * first rollout). We derive recent activities from two on-disk sources:
+ *
+ *  1. Cron runs: /home/node/.openclaw/cron/runs/<jobId>.jsonl — one record
+ *     per job trigger with status/summary/durationMs.
+ *  2. Session updates: the latest JSONL mtime under agents/<id>/sessions/
+ *     approximates when the agent last exchanged messages.
  */
-async function deriveFromGateway(limit: number): Promise<DerivedActivity[]> {
-  const candidates = ['/api/sessions', '/api/v1/sessions'];
-  let sessions: GatewaySession[] | null = null;
-  for (const p of candidates) {
+function deriveFromPvc(limit: number): DerivedActivity[] {
+  const out: DerivedActivity[] = [];
+  const cronRunsDir = join(OPENCLAW_DIR, 'cron', 'runs');
+
+  // 1. Cron runs
+  if (existsSync(cronRunsDir)) {
     try {
-      const data = await gatewayFetch<unknown>(p, { timeoutMs: 2500 });
-      if (Array.isArray(data)) {
-        sessions = data as GatewaySession[];
-        break;
-      }
-      const any = data as { sessions?: GatewaySession[]; items?: GatewaySession[] };
-      if (any?.sessions) {
-        sessions = any.sessions;
-        break;
-      }
-      if (any?.items) {
-        sessions = any.items;
-        break;
+      const files = readdirSync(cronRunsDir).filter((f) => f.endsWith('.jsonl'));
+      for (const f of files) {
+        const jobId = f.replace(/\.jsonl$/, '');
+        const path = join(cronRunsDir, f);
+        let raw = '';
+        try {
+          raw = readFileSync(path, 'utf-8');
+        } catch {
+          continue;
+        }
+        const lines = raw.trim().split('\n').slice(-10); // last 10 records per job
+        for (const line of lines) {
+          try {
+            const r = JSON.parse(line) as CronRunRecord;
+            if (r.action !== 'finished') continue;
+            const tokens = (r.usage?.input_tokens || 0) + (r.usage?.output_tokens || 0);
+            out.push({
+              id: `cron:${jobId}:${r.ts}`,
+              timestamp: new Date(r.ts || Date.now()).toISOString(),
+              type: 'cron',
+              description: r.summary || `Cron ${jobId} finished (${r.status || 'ok'})`,
+              status: r.status === 'ok' ? 'success' : r.status === 'error' ? 'error' : 'success',
+              duration_ms: r.durationMs ?? null,
+              tokens_used: tokens > 0 ? tokens : null,
+              agent: null,
+              metadata: {
+                jobId,
+                model: r.model,
+                provider: r.provider,
+                deliveryStatus: r.deliveryStatus,
+              },
+            });
+          } catch {
+            /* skip */
+          }
+        }
       }
     } catch {
-      /* try next */
+      /* ignore cron scan errors */
     }
   }
-  if (!sessions) return [];
 
-  return sessions
-    .filter((s) => s.updatedAt)
-    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
-    .slice(0, limit)
-    .map((s) => {
-      const key = s.key || '';
-      const parts = key.split(':');
-      const agentId = s.agentId || parts[1] || 'main';
-      const kind = parts[2] || 'session';
-      return {
-        id: `derived:${key}`,
-        timestamp: new Date(s.updatedAt || Date.now()).toISOString(),
-        type: kind === 'cron' ? 'cron' : kind === 'subagent' ? 'agent_action' : 'message',
-        description: s.label || `${kind} session on ${agentId}`,
-        status: 'success',
-        duration_ms: null,
-        tokens_used: s.totalTokens ?? null,
-        agent: agentId,
-        metadata: { model: s.model, key },
-      };
-    });
+  // 2. Session file mtimes (last session per agent)
+  const agentsDir = join(OPENCLAW_DIR, 'agents');
+  if (existsSync(agentsDir)) {
+    try {
+      for (const agentId of readdirSync(agentsDir)) {
+        const sessionsDir = join(agentsDir, agentId, 'sessions');
+        if (!existsSync(sessionsDir)) continue;
+        let newest: { file: string; mtime: number } | null = null;
+        try {
+          for (const f of readdirSync(sessionsDir)) {
+            if (!f.endsWith('.jsonl')) continue;
+            const st = statSync(join(sessionsDir, f));
+            if (!newest || st.mtimeMs > newest.mtime) {
+              newest = { file: f, mtime: st.mtimeMs };
+            }
+          }
+        } catch {
+          continue;
+        }
+        if (newest) {
+          out.push({
+            id: `session:${agentId}:${newest.file}`,
+            timestamp: new Date(newest.mtime).toISOString(),
+            type: 'message',
+            description: `${agentId} — last session activity`,
+            status: 'success',
+            duration_ms: null,
+            tokens_used: null,
+            agent: agentId,
+            metadata: { sessionFile: newest.file },
+          });
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  out.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return out.slice(0, limit);
 }
 
 export async function GET(request: NextRequest) {
@@ -88,32 +139,42 @@ export async function GET(request: NextRequest) {
     const endDate = searchParams.get('endDate') || undefined;
     const sort = (searchParams.get('sort') || 'newest') as 'newest' | 'oldest';
     const format = searchParams.get('format') || 'json';
-    const limit = Math.min(parseInt(searchParams.get('limit') || '20'), format === 'csv' ? 10000 : 100);
+    const limit = Math.min(
+      parseInt(searchParams.get('limit') || '20'),
+      format === 'csv' ? 10000 : 100
+    );
     const offset = parseInt(searchParams.get('offset') || '0');
 
-    const result = getActivities({ type, status, agent, startDate, endDate, sort, limit, offset });
+    const result = getActivities({
+      type, status, agent, startDate, endDate, sort, limit, offset,
+    });
 
-    // If DB is empty and no filters, derive recent activities from gateway sessions.
-    let activities = result.activities;
+    let activities = result.activities as DerivedActivity[];
     let total = result.total;
     let derived = false;
+
+    // If DB is empty and no filters are set, derive recent activities from
+    // cron run logs + session file mtimes so the Activity Log tab is useful
+    // immediately after a rollout (SQLite starts empty on fresh PVC state).
     if (total === 0 && !type && !status && !agent && !startDate && !endDate && offset === 0) {
-      const fromGw = await deriveFromGateway(limit);
-      if (fromGw.length > 0) {
-        activities = fromGw;
-        total = fromGw.length;
+      const fromDisk = deriveFromPvc(limit);
+      if (fromDisk.length > 0) {
+        activities = fromDisk;
+        total = fromDisk.length;
         derived = true;
       }
     }
 
     if (format === 'csv') {
       const header = 'id,timestamp,type,description,status,duration_ms,tokens_used,agent\n';
-      const rows = activities.map((a) => [
-        a.id, a.timestamp, a.type,
-        `"${(a.description || '').replace(/"/g, '""')}"`,
-        a.status, a.duration_ms ?? '', a.tokens_used ?? '',
-        a.agent ?? '',
-      ].join(',')).join('\n');
+      const rows = activities.map((a) =>
+        [
+          a.id, a.timestamp, a.type,
+          `"${(a.description || '').replace(/"/g, '""')}"`,
+          a.status, a.duration_ms ?? '', a.tokens_used ?? '',
+          a.agent ?? '',
+        ].join(',')
+      ).join('\n');
       const csv = header + rows;
       return new NextResponse(csv, {
         headers: {
@@ -124,10 +185,7 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      activities,
-      total,
-      limit,
-      offset,
+      activities, total, limit, offset,
       hasMore: offset + limit < total,
       derived,
     });
@@ -140,14 +198,12 @@ export async function GET(request: NextRequest) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-
     if (!body.type || !body.description || !body.status) {
       return NextResponse.json(
         { error: 'Missing required fields: type, description, status' },
         { status: 400 }
       );
     }
-
     const validStatuses = ['success', 'error', 'pending', 'running'];
     if (!validStatuses.includes(body.status)) {
       return NextResponse.json(
@@ -155,14 +211,12 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-
     const activity = logActivity(body.type, body.description, body.status, {
       duration_ms: body.duration_ms ?? null,
       tokens_used: body.tokens_used ?? null,
       agent: body.agent ?? null,
       metadata: body.metadata ?? null,
     });
-
     return NextResponse.json(activity, { status: 201 });
   } catch (error) {
     console.error('Failed to save activity:', error);
