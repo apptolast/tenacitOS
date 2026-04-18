@@ -2,10 +2,10 @@
 
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Sky, Environment } from '@react-three/drei';
-import { Suspense, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { Vector3 } from 'three';
 import { AGENTS } from './agentsConfig';
-import type { AgentState } from './agentsConfig';
+import type { AgentState, AgentStatus } from './agentsConfig';
 import AgentDesk from './AgentDesk';
 import Floor from './Floor';
 import Walls from './Walls';
@@ -19,21 +19,101 @@ import WallClock from './WallClock';
 import FirstPersonControls from './FirstPersonControls';
 import MovingAvatar from './MovingAvatar';
 
+interface OfficeApiAgent {
+  id: string;
+  name: string;
+  emoji: string;
+  color: string;
+  role: string;
+  currentTask: string;
+  isActive: boolean;
+  lastSeen: number;
+}
+
+/**
+ * Build a sane default state for an agent for which we have no live data yet.
+ * Never returns undefined — children expect a complete AgentState shape and
+ * would crash on state.status otherwise (see control.apptolast.com console
+ * error history).
+ */
+function defaultState(id: string): AgentState {
+  return {
+    id,
+    status: 'idle',
+    currentTask: undefined,
+    model: undefined,
+    tokensPerHour: 0,
+    tasksInQueue: 0,
+    uptime: 0,
+  };
+}
+
+function mapApiToState(a: OfficeApiAgent): AgentState {
+  // /api/office returns { isActive, currentTask: "ACTIVE: ..."|"IDLE: ..."|"SLEEPING: ..." }
+  let status: AgentStatus = 'idle';
+  const task = a.currentTask || '';
+  if (a.isActive || /^ACTIVE/i.test(task)) status = 'working';
+  else if (/^ERROR/i.test(task)) status = 'error';
+  else if (/^THINKING/i.test(task)) status = 'thinking';
+  else status = 'idle';
+
+  const cleanTask = task.replace(/^(ACTIVE|IDLE|SLEEPING|ERROR|THINKING):\s*/i, '').trim();
+  return {
+    id: a.id,
+    status,
+    currentTask: cleanTask && cleanTask !== 'zzZ…' ? cleanTask : undefined,
+    model: undefined,
+    tokensPerHour: 0,
+    tasksInQueue: 0,
+    uptime: a.lastSeen ? Math.max(0, Math.round((Date.now() - a.lastSeen) / 86400000)) : 0,
+  };
+}
+
 export default function Office3D() {
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [interactionModal, setInteractionModal] = useState<string | null>(null);
   const [controlMode, setControlMode] = useState<'orbit' | 'fps'>('orbit');
   const [avatarPositions, setAvatarPositions] = useState<Map<string, any>>(new Map());
-  
-  // Mock data - TODO: Replace with real API data
-  const [agentStates] = useState<Record<string, AgentState>>({
-    main: { id: 'main', status: 'working', currentTask: 'Procesando emails', model: 'opus', tokensPerHour: 15000, tasksInQueue: 3, uptime: 12 },
-    academic: { id: 'academic', status: 'idle', model: 'sonnet', tokensPerHour: 0, tasksInQueue: 0, uptime: 8 },
-    studio: { id: 'studio', status: 'thinking', currentTask: 'Generando guión YouTube', model: 'opus', tokensPerHour: 8000, tasksInQueue: 1, uptime: 5 },
-    linkedin: { id: 'linkedin', status: 'working', currentTask: 'Redactando post', model: 'sonnet', tokensPerHour: 5000, tasksInQueue: 2, uptime: 10 },
-    social: { id: 'social', status: 'idle', model: 'sonnet', tokensPerHour: 0, tasksInQueue: 0, uptime: 7 },
-    infra: { id: 'infra', status: 'error', currentTask: 'Failed deployment', model: 'haiku', tokensPerHour: 1000, tasksInQueue: 0, uptime: 15 },
+
+  // Live agent states fetched from /api/office. Initialize every known agent
+  // with a defaultState so the 3D scene renders immediately (no undefined).
+  const [agentStates, setAgentStates] = useState<Record<string, AgentState>>(() => {
+    const seeded: Record<string, AgentState> = {};
+    for (const a of AGENTS) seeded[a.id] = defaultState(a.id);
+    return seeded;
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/office', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = (await res.json()) as { agents?: OfficeApiAgent[] };
+        if (cancelled || !Array.isArray(data.agents)) return;
+        setAgentStates((prev) => {
+          const next = { ...prev };
+          for (const a of data.agents!) next[a.id] = mapApiToState(a);
+          return next;
+        });
+      } catch {
+        // Keep default states; do not crash the 3D scene.
+      }
+    };
+    load();
+    const interval = setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Safe accessor — never returns undefined, which would crash AgentDesk /
+  // MovingAvatar / AgentPanel (they read state.status unconditionally).
+  const stateOf = useMemo(
+    () => (agentId: string): AgentState => agentStates[agentId] || defaultState(agentId),
+    [agentStates]
+  );
 
   const handleDeskClick = (agentId: string) => {
     setSelectedAgent(agentId);
@@ -115,7 +195,7 @@ export default function Office3D() {
             <AgentDesk
               key={agent.id}
               agent={agent}
-              state={agentStates[agent.id]}
+              state={stateOf(agent.id)}
               onClick={() => handleDeskClick(agent.id)}
               isSelected={selectedAgent === agent.id}
             />
@@ -126,7 +206,7 @@ export default function Office3D() {
             <MovingAvatar
               key={`avatar-${agent.id}`}
               agent={agent}
-              state={agentStates[agent.id]}
+              state={stateOf(agent.id)}
               officeBounds={{ minX: -8, maxX: 8, minZ: -7, maxZ: 7 }}
               obstacles={obstacles}
               otherAvatarPositions={avatarPositions}
@@ -175,10 +255,10 @@ export default function Office3D() {
       </Canvas>
 
       {/* Panel lateral cuando se selecciona un agente */}
-      {selectedAgent && (
+      {selectedAgent && AGENTS.find((a) => a.id === selectedAgent) && (
         <AgentPanel
-          agent={AGENTS.find(a => a.id === selectedAgent)!}
-          state={agentStates[selectedAgent]}
+          agent={AGENTS.find((a) => a.id === selectedAgent)!}
+          state={stateOf(selectedAgent)}
           onClose={handleClosePanel}
         />
       )}
